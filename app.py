@@ -17,7 +17,8 @@ if st.button("🔄 Cập nhật dữ liệu & Huấn luyện lại thuật toán
 col_sel1, col_sel2, col_sel3 = st.columns(3)
 
 with col_sel1:
-    tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT"]
+    # ĐÃ THÊM MÃ VIX VÀO ĐÂY
+    tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT", "VIX"]
     symbol = st.selectbox("🎯 Chọn mã cổ phiếu:", tickers)
 
 with col_sel2:
