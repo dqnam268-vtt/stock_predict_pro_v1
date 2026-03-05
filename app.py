@@ -3,92 +3,161 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from xgboost import XGBRegressor, XGBClassifier
+import yfinance as yf
+from datetime import datetime, timedelta
 import sys
 import os
 
-# Ép Python nhận diện thư mục hiện tại làm gốc để tìm thư mục 'src'
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from xgboost import XGBRegressor
-from src.data_loader import DataLoader
-from src.features import build_features
-from src.predictor import AIModel
+# ==========================================
+# PHẦN 1: CÁC MODULE TOÁN HỌC & DỮ LIỆU
+# ==========================================
+class DataLoader:
+    def get_data(self, symbol, days=1095):
+        yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        ticker = yf.Ticker(yf_symbol)
+        df = ticker.history(start=start_date, end=end_date)
+        if df.empty: return pd.DataFrame()
+            
+        df.reset_index(inplace=True)
+        df.columns = [c.lower() for c in df.columns]
+        if 'date' in df.columns and df['date'].dt.tz is not None:
+            df['date'] = df['date'].dt.tz_localize(None)
+            
+        vn_ticker = yf.Ticker("^VNINDEX")
+        vn_df = vn_ticker.history(start=start_date, end=end_date)
+        if not vn_df.empty:
+            vn_df.reset_index(inplace=True)
+            vn_df.columns = [c.lower() for c in vn_df.columns]
+            if 'date' in vn_df.columns and vn_df['date'].dt.tz is not None:
+                vn_df['date'] = vn_df['date'].dt.tz_localize(None)
+            vn_df = vn_df[['date', 'close']].rename(columns={'close': 'vn_close'})
+            df = pd.merge(df, vn_df, on='date', how='left')
+            df['vn_close'] = df['vn_close'].ffill()
+        else:
+            df['vn_close'] = 1000 
+        return df
 
+def build_features(df):
+    df = df.copy()
+    df['returns'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['returns'].rolling(window=21).std() * np.sqrt(252)
+    
+    ma20 = df['close'].rolling(window=20).mean()
+    std20 = df['close'].rolling(window=20).std()
+    df['z_score'] = (df['close'] - ma20) / std20
+    
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = macd_line - macd_signal
+
+    def get_hurst(ts):
+        lags = range(2, 20)
+        tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+        return np.polyfit(np.log(lags), np.log(tau), 1)[0] * 2.0
+
+    df['hurst'] = df['close'].rolling(window=100).apply(get_hurst, raw=True)
+    
+    high_low_diff = df['high'] - df['low']
+    high_low_diff = high_low_diff.replace(0, 0.001) 
+    mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / high_low_diff
+    df['adl'] = (mfm * df['volume']).cumsum()
+    df['adl_zscore'] = (df['adl'] - df['adl'].rolling(20).mean()) / df['adl'].rolling(20).std()
+
+    tp_v = ((df['high'] + df['low'] + df['close']) / 3) * df['volume']
+    df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
+    df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
+    
+    if 'vn_close' in df.columns:
+        df['vn_returns'] = np.log(df['vn_close'] / df['vn_close'].shift(1))
+        df['market_corr'] = df['returns'].rolling(window=21).corr(df['vn_returns'])
+        df['market_corr'] = df['market_corr'].fillna(0)
+    else:
+        df['vn_returns'] = 0
+        df['market_corr'] = 0
+    return df.dropna()
+
+class AIModel:
+    def __init__(self):
+        self.model = XGBClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.03,
+            subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42
+        )
+        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'vn_returns', 'market_corr']
+
+    def train(self, df):
+        df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
+        df = df.dropna()
+        self.model.fit(df[self.features], df['target'])
+        
+    def predict_prob(self, df):
+        return self.model.predict_proba(df[self.features])[:, 1]
+
+# ==========================================
+# PHẦN 2: GIAO DIỆN APP (UI)
+# ==========================================
 st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Cập nhật dữ liệu & Huấn luyện lại thuật toán (Real-time)", use_container_width=True):
+if st.button("🔄 Cập nhật dữ liệu & Huấn luyện lại thuật toán", use_container_width=True):
     st.cache_data.clear()
 
-# ==========================================
-# 1. GIAO DIỆN LỰA CHỌN TÙY CHỈNH
-# ==========================================
 col_sel1, col_sel2, col_sel3 = st.columns(3)
 with col_sel1:
     tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT", "VIX"]
     symbol = st.selectbox("🎯 Chọn mã cổ phiếu:", tickers)
 with col_sel2:
-    timeframe = st.selectbox(
-        "🔙 Dò tìm Cực trị (Quá khứ):", 
-        ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], 
-        index=1
-    )
+    timeframe = st.selectbox("🔙 Dò tìm Cực trị:", ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], index=1)
 with col_sel3:
-    future_horizon = st.selectbox(
-        "🔮 AI Dự báo Tương lai:", 
-        ["1 Tuần tới (5 phiên)", "1 Tháng tới (21 phiên)"], 
-        index=1
-    )
+    future_horizon = st.selectbox("🔮 AI Dự báo Tương lai:", ["1 Tuần tới (5 phiên)", "1 Tháng tới (21 phiên)"], index=1)
 
-# THÊM CÔNG TẮC BẬT/TẮT NẾN NHẬT (Nằm ngay trên biểu đồ)
+# NÂNG CẤP 2: NHẬP TỔNG VỐN ĐẦU TƯ (NAV)
+nav = st.number_input("💵 Nhập Tổng Vốn Đầu Tư (VNĐ):", min_value=1000000, value=100000000, step=10000000, format="%d")
+
 show_candle = st.toggle("🕯️ Hiển thị Biểu đồ Nến Nhật (Candlestick)", value=False)
 
 window_dict = {"Theo Tuần (5 phiên)": 5, "Theo Tháng (21 phiên)": 21, "Theo Quý (63 phiên)": 63, "Theo Năm (252 phiên)": 252}
 window = window_dict[timeframe]
 future_days = 5 if "Tuần" in future_horizon else 21
 
-# ==========================================
-# 2. XỬ LÝ DỮ LIỆU & HUẤN LUYỆN AI
-# ==========================================
 loader = DataLoader()
-with st.spinner(f"Đang đồng bộ dữ liệu thị trường và vẽ biểu đồ đa chiều cho {symbol}..."):
+with st.spinner(f"Đang đồng bộ dữ liệu và chạy Backtest cho {symbol}..."):
     df = loader.get_data(symbol)
 
 if not df.empty and len(df) > 50:
     df_feat = build_features(df)
     
-    # AI Phân loại (Xác suất)
     model = AIModel()
     model.train(df_feat)
     latest_row = df_feat.tail(1)
     prob = model.predict_prob(latest_row)[0]
     
-    # Trích xuất dữ liệu Vi mô & Vĩ mô
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
     
-    if 'market_corr' in latest_row.columns:
+    if 'market_corr' in latest_row.columns and latest_row['vn_close'].values[0] != 1000:
         market_corr = latest_row['market_corr'].values[0]
-        if market_corr > 0.6:
-            corr_status = f"Đồng pha mạnh với VN-Index ({market_corr:.2f})"
-        elif market_corr < -0.3:
-            corr_status = f"Đi ngược bão VN-Index ({market_corr:.2f})"
-        else:
-            corr_status = f"Ít phụ thuộc VN-Index ({market_corr:.2f})"
+        if market_corr > 0.6: corr_status = f"Đồng pha mạnh VN-Index ({market_corr:.2f})"
+        elif market_corr < -0.3: corr_status = f"Đi ngược VN-Index ({market_corr:.2f})"
+        else: corr_status = f"Ít phụ thuộc VN-Index ({market_corr:.2f})"
     else:
-        corr_status = "Không có dữ liệu VN-Index"
-    
-    # AI Hồi quy (Vẽ quỹ đạo tương lai)
+        corr_status = "⚠️ Không có dữ liệu VN-Index (Yahoo Finance lỗi)"
+        
     df_reg = df[['close']].copy()
-    for i in range(1, 6):
-        df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
+    for i in range(1, 6): df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
     df_reg = df_reg.dropna()
     features_reg = [f'lag_{5}', f'lag_{4}', f'lag_{3}', f'lag_{2}', f'lag_{1}']
     
     X_adapt = df_reg[features_reg]
     y_adapt = df_reg['close']
-    
     reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
@@ -109,142 +178,150 @@ if not df.empty and len(df) > 50:
     buy_price = future_preds_adapt[future_min_idx]
     
     can_sell_T3 = False
+    profit_pct = 0
     if future_min_idx + 3 < len(future_preds_adapt):
         valid_sell_slice = future_preds_adapt[future_min_idx + 3:]
-        valid_sell_dates = future_dates[future_min_idx + 3:]
         offset_idx = int(np.argmax(valid_sell_slice))
         future_max_idx = future_min_idx + 3 + offset_idx
-        
         sell_date = future_dates[future_max_idx]
         sell_price = future_preds_adapt[future_max_idx]
         profit_pct = (sell_price - buy_price) / buy_price * 100
         can_sell_T3 = True
 
-    # ==========================================
-    # 3. HIỂN THỊ DASHBOARD & BIỂU ĐỒ KÉP
-    # ==========================================
-    col1, col2 = st.columns([1, 2.8])
-    
-    with col1:
-        st.info("💡 Tín hiệu AI & Dòng tiền")
-        st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
-        st.write("---")
-        st.write(f"- **Khối lượng:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
-        st.write(f"- **Dòng tiền:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
-        st.write(f"- **Tương quan:** {corr_status}")
+    # TOÁN HỌC: TIÊU CHUẨN KELLY (QUẢN TRỊ VỐN)
+    stop_loss_pct = 5.0 # Cố định mức cắt lỗ an toàn là 5%
+    kelly_pct = 0
+    if can_sell_T3 and profit_pct > 0:
+        b = profit_pct / stop_loss_pct # Tỷ lệ Lợi nhuận / Rủi ro
+        p = prob # Xác suất thắng
+        q = 1 - p # Xác suất thua
+        if b > 0:
+            kelly_f = p - (q / b)
+            # Áp dụng Half-Kelly (Chia đôi) để giảm rủi ro tối đa thực tế
+            kelly_pct = max(0, kelly_f / 2) * 100 
 
-    with col2:
-        st.subheader(f"Biểu đồ Đa chiều - {symbol}")
+    invest_amount = nav * (kelly_pct / 100)
+    shares_to_buy = int(invest_amount / buy_price) if buy_price > 0 else 0
+
+    # TOÁN HỌC: CHẠY BACKTEST QUÁ KHỨ (3 NĂM)
+    bt_df = df_feat.copy()
+    bt_df['prob'] = model.predict_prob(bt_df)
+    bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0) # Ngưỡng mua an toàn
+    bt_df['daily_return'] = bt_df['returns']
+    bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
+    
+    bt_df['bnh_equity'] = np.exp(bt_df['daily_return'].cumsum()) * nav
+    bt_df['strategy_equity'] = np.exp(bt_df['strategy_return'].fillna(0).cumsum()) * nav
+    
+    total_return_ai = (bt_df['strategy_equity'].iloc[-1] / nav - 1) * 100
+    total_return_bnh = (bt_df['bnh_equity'].iloc[-1] / nav - 1) * 100
+    
+    roll_max = bt_df['strategy_equity'].cummax()
+    drawdown = bt_df['strategy_equity'] / roll_max - 1
+    max_dd = drawdown.min() * 100
+    
+    winning_days = len(bt_df[(bt_df['signal'].shift(1) == 1) & (bt_df['daily_return'] > 0)])
+    total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
+    win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
+
+    # ==========================================
+    # 3. HIỂN THỊ CÁC TAB CHỨC NĂNG
+    # ==========================================
+    tab1, tab2 = st.tabs(["🔮 Dự báo & Khuyến nghị", "📊 Backtest & Quản trị Vốn"])
+    
+    # ------------------------------------
+    # TAB 1: GIAO DỊCH HIỆN TẠI (GIỮ NGUYÊN)
+    # ------------------------------------
+    with tab1:
+        col1, col2 = st.columns([1, 2.8])
+        with col1:
+            st.info("💡 Tín hiệu AI & Dòng tiền")
+            st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
+            st.write("---")
+            st.write(f"- **Khối lượng:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
+            st.write(f"- **Dòng tiền:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
+            st.write(f"- **Tương quan:** {corr_status}")
+
+        with col2:
+            st.subheader(f"Biểu đồ Đa chiều - {symbol}")
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, subplot_titles=("", ""), row_width=[0.25, 0.75])
+            df_plot = df.iloc[-150:]
+            
+            if show_candle:
+                fig.add_trace(go.Candlestick(x=df_plot['date'], open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name='Nến', increasing_line_color='#00CC00', decreasing_line_color='#FF0000'), row=1, col=1)
+            else:
+                fig.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['close'], mode='lines', name='Giá thực tế', line=dict(color='#1f77b4', width=2)), row=1, col=1)
+            
+            fig.add_trace(go.Scatter(x=future_dates, y=future_preds_adapt, mode='lines', name='AI Dự báo', line=dict(color='magenta', width=2.5, dash='dash')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[buy_date], y=[buy_price], mode='markers', name='MUA', marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))), row=1, col=1)
+            
+            if can_sell_T3:
+                fig.add_trace(go.Scatter(x=[sell_date], y=[sell_price], mode='markers', name='BÁN', marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[buy_date, sell_date], y=[buy_price, sell_price], mode='lines', name='Kỳ vọng', line=dict(color='green', width=1.5, dash='dot')), row=1, col=1)
+
+            volume_colors = ['#00CC00' if row['close'] >= row['open'] else '#FF0000' for _, row in df_plot.iterrows()]
+            fig.add_trace(go.Bar(x=df_plot['date'], y=df_plot['volume'], marker_color=volume_colors, name='Volume'), row=2, col=1)
+            
+            fig.update_layout(hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), dragmode="pan")
+            fig.update_layout(xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+
+        st.markdown("---")
+        st.subheader("📝 BẢN GHI NHỚ GIAO DỊCH (TRADE PLAN)")
         
-        # 🚀 KHỞI TẠO BIỂU ĐỒ 2 TẦNG (Subplots)
-        fig = make_subplots(
-            rows=2, cols=1, 
-            shared_xaxes=True, 
-            vertical_spacing=0.03,
-            subplot_titles=(f"Hành vi Giá {symbol}", "Khối lượng Giao dịch (Volume)"),
-            row_width=[0.25, 0.75] # Tỷ lệ: Khung Volume chiếm 25%, Giá chiếm 75%
-        )
-        
-        # Cắt dữ liệu 150 phiên gần nhất cho nhẹ mượt
-        df_plot = df.iloc[-150:]
-        
-        # --- VẼ KHUNG 1: GIÁ (NẾN HOẶC ĐƯỜNG) ---
-        if show_candle:
-            fig.add_trace(go.Candlestick(
-                x=df_plot['date'],
-                open=df_plot['open'],
-                high=df_plot['high'],
-                low=df_plot['low'],
-                close=df_plot['close'],
-                name='Nến Nhật',
-                increasing_line_color='#00CC00', # Nến tăng màu xanh lá
-                decreasing_line_color='#FF0000'  # Nến giảm màu đỏ
-            ), row=1, col=1)
+        conclusion = ""
+        if prob > 0.6 and can_sell_T3 and profit_pct > 1.5 and adl_zscore > 0:
+            conclusion = "🌟 **RẤT TÍCH CỰC:** Hội tụ đủ yếu tố kỹ thuật, dòng tiền lớn đang gom. Hệ thống Kelly cho phép mở vị thế."
+        elif prob > 0.5 and can_sell_T3 and profit_pct > 0:
+            conclusion = "⚖️ **TRUNG LẬP:** Có biên lợi nhuận T+3 nhưng rủi ro cao. Khuyến nghị đi vốn nhỏ theo tính toán của Kelly."
         else:
-            fig.add_trace(go.Scatter(
-                x=df_plot['date'], y=df_plot['close'],
-                mode='lines', name='Giá thực tế', line=dict(color='#1f77b4', width=2)
-            ), row=1, col=1)
-        
-        # Vẽ đường AI Tương lai
-        fig.add_trace(go.Scatter(
-            x=future_dates, y=future_preds_adapt, mode='lines', 
-            name='AI Dự báo Tương lai', line=dict(color='magenta', width=2.5, dash='dash')
-        ), row=1, col=1)
-        
-        # Vẽ điểm MUA/BÁN
-        fig.add_trace(go.Scatter(
-            x=[buy_date], y=[buy_price], mode='markers', name='Điểm MUA T+3',
-            marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))
-        ), row=1, col=1)
-        
+            conclusion = "⛔ **ĐỨNG NGOÀI:** Rủi ro lớn hơn Lợi nhuận. Thuật toán Kelly đề xuất KHÔNG giải ngân."
+
+        report_text = f"""
+        **1. Kế hoạch lướt sóng (Ngoại suy T+3):**
+        - 🟢 **Điểm chờ MUA:** Quanh vùng **{buy_price:,.0f} đ** (Dự kiến: {buy_date.strftime('%d/%m/%Y')})
+        """
         if can_sell_T3:
-            fig.add_trace(go.Scatter(
-                x=[sell_date], y=[sell_price], mode='markers', name='Điểm BÁN T+3',
-                marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))
-            ), row=1, col=1)
-            fig.add_trace(go.Scatter(
-                x=[buy_date, sell_date], y=[buy_price, sell_price], mode='lines', 
-                name='Biên lợi nhuận', line=dict(color='green', width=1.5, dash='dot')
-            ), row=1, col=1)
+            report_text += f"""- 🔴 **Điểm chờ BÁN:** Quanh vùng **{sell_price:,.0f} đ** (Dự kiến: {sell_date.strftime('%d/%m/%Y')})
+        - 🎯 **Biên lợi nhuận kỳ vọng:** **{profit_pct:+.2f}%**"""
+        else:
+            report_text += f"""- ⚠️ **Lưu ý:** Khung thời gian hẹp không đủ để hoàn thành vòng quay T+3."""
 
-        # --- VẼ KHUNG 2: KHỐI LƯỢNG GIAO DỊCH (VOLUME) ---
-        # Đổ màu khối lượng: Xanh nếu Giá Đóng >= Giá Mở, Đỏ nếu Giá Đóng < Giá Mở
-        volume_colors = ['#00CC00' if row['close'] >= row['open'] else '#FF0000' for _, row in df_plot.iterrows()]
+        report_text += f"\n\n**2. Quản trị Vốn Toán học (Kelly Criterion):**\n"
+        if kelly_pct > 0:
+            report_text += f"- **Tỷ trọng an toàn:** Đi tối đa **{kelly_pct:.1f}%** tổng vốn.\n"
+            report_text += f"- **Khuyến nghị giải ngân:** Mua **{shares_to_buy:,}** cổ phiếu (Tương đương **{invest_amount:,.0f} VNĐ**)."
+        else:
+            report_text += f"- **Tỷ trọng an toàn:** **0%**. Lệnh này có tỷ lệ Rủi ro/Lợi nhuận không đạt chuẩn toán học để đánh cược."
+
+        report_text += f"\n\n**3. Kết luận từ AI Quant:**\n{conclusion}"
+        st.success(report_text)
+
+    # ------------------------------------
+    # TAB 2: BACKTEST (KIỂM ĐỊNH QUÁ KHỨ)
+    # ------------------------------------
+    with tab2:
+        st.subheader(f"Kiểm định năng lực AI (Backtest 3 Năm) - Mã {symbol}")
+        col_bt1, col_bt2, col_bt3, col_bt4 = st.columns(4)
+        col_bt1.metric("Lợi nhuận AI (Tích lũy)", f"{total_return_ai:+.1f}%", delta="Vượt trội so với Mua & Giữ", delta_color="normal" if total_return_ai > total_return_bnh else "inverse")
+        col_bt2.metric("Lợi nhuận Mua & Giữ", f"{total_return_bnh:+.1f}%")
+        col_bt3.metric("Xác suất Thắng (Win Rate)", f"{win_rate:.1f}%")
+        col_bt4.metric("Sụt giảm tối đa (Max Drawdown)", f"{max_dd:.1f}%", delta="Rủi ro hệ thống", delta_color="inverse")
         
-        fig.add_trace(go.Bar(
-            x=df_plot['date'],
-            y=df_plot['volume'],
-            marker_color=volume_colors,
-            name='Khối lượng'
-        ), row=2, col=1)
+        fig_bt = go.Figure()
+        fig_bt.add_trace(go.Scatter(x=bt_df['date'], y=bt_df['strategy_equity'], mode='lines', name='Đường cong vốn AI (Equity Curve)', line=dict(color='magenta', width=2.5)))
+        fig_bt.add_trace(go.Scatter(x=bt_df['date'], y=bt_df['bnh_equity'], mode='lines', name='Nắm giữ dài hạn (Buy & Hold)', line=dict(color='gray', width=1.5, dash='dot')))
         
-        # Tùy chỉnh Layout & Tương tác
-        fig.update_layout(
-            xaxis_title="Thời gian (Cuộn chuột để Zoom, Kéo để Di chuyển)",
+        fig_bt.update_layout(
+            title="Đồ thị tăng trưởng NAV",
+            yaxis_title="Giá trị Tài khoản (VNĐ)",
             hovermode="x unified",
-            margin=dict(l=0, r=0, t=30, b=0),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            dragmode="pan"
+            margin=dict(l=0, r=0, t=40, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
+        st.plotly_chart(fig_bt, use_container_width=True)
         
-        # Tắt rangeslider mặc định của Candlestick (để không che mất biểu đồ Volume)
-        fig.update_layout(xaxis_rangeslider_visible=False)
-        
-        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-
-    # ==========================================
-    # 4. XUẤT BÁO CÁO DẠNG TEXT (TRADE PLAN)
-    # ==========================================
-    st.markdown("---")
-    st.subheader("📝 BẢN GHI NHỚ GIAO DỊCH (TRADE PLAN)")
-    
-    conclusion = ""
-    if prob > 0.6 and can_sell_T3 and profit_pct > 1.5 and adl_zscore > 0:
-        conclusion = "🌟 **RẤT TÍCH CỰC:** Hội tụ đủ yếu tố kỹ thuật, AI dự báo xu hướng tăng, dòng tiền đang gom hàng. Có thể xem xét giải ngân."
-    elif prob > 0.5 and can_sell_T3 and profit_pct > 0:
-        conclusion = "⚖️ **TRUNG LẬP / CÓ THỂ LƯỚT SÓNG:** Có biên lợi nhuận T+3 nhưng tín hiệu dòng tiền chưa quá mạnh. Nên đi vốn nhỏ."
-    else:
-        conclusion = "⛔ **RỦI RO / ĐỨNG NGOÀI:** Biên lợi nhuận mỏng hoặc AI báo rủi ro giảm giá cao. Khuyến nghị quan sát thêm."
-
-    report_text = f"""
-    **1. Tổng quan Vi mô & Vĩ mô mã {symbol}:**
-    - **Giá đóng cửa hiện tại:** {current_price:,.0f} đ
-    - **Tương quan Vĩ mô:** {corr_status}
-    - **Trạng thái dòng tiền lớn:** {'Đang Gom hàng' if adl_zscore > 0 else 'Có dấu hiệu Xả'}
-    - **Xác suất XGBoost đánh giá tăng giá:** {prob*100:.1f}%
-
-    **2. Kế hoạch lướt sóng (Ngoại suy T+3):**
-    - 🟢 **Điểm chờ MUA:** Quanh vùng **{buy_price:,.0f} đ** (Dự kiến: {buy_date.strftime('%d/%m/%Y')})
-    """
-    if can_sell_T3:
-        report_text += f"""- 🔴 **Điểm chờ BÁN:** Quanh vùng **{sell_price:,.0f} đ** (Dự kiến: {sell_date.strftime('%d/%m/%Y')})
-    - 🎯 **Biên lợi nhuận kỳ vọng:** **{profit_pct:+.2f}%**"""
-    else:
-        report_text += f"""- ⚠️ **Lưu ý:** Khung thời gian hẹp không đủ để hoàn thành vòng quay T+3."""
-
-    report_text += f"\n\n**3. Kết luận từ AI Quant:**\n{conclusion}"
-    st.info(report_text)
+        st.caption("ℹ️ *Ghi chú:* Backtest được chạy trên cơ chế: AI mua khi xác suất tăng > 55%. Đây là lợi nhuận mô phỏng lý thuyết, chưa bao gồm thuế phí giao dịch.")
 
 else:
     st.error("Không thể kết nối dữ liệu hoặc dữ liệu quá ngắn.")
