@@ -116,7 +116,8 @@ with col_sel1:
 with col_sel2:
     timeframe = st.selectbox("🔙 Dò tìm Cực trị:", ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], index=1)
 with col_sel3:
-    future_horizon = st.selectbox("🔮 AI Dự báo Tương lai:", ["1 Tuần tới (5 phiên)", "1 Tháng tới (21 phiên)"], index=1)
+    # NÂNG CẤP: Bổ sung chu kỳ 3 tháng (63 phiên)
+    future_horizon = st.selectbox("🔮 AI Dự báo Tương lai:", ["1 Tuần tới (5 phiên)", "1 Tháng tới (21 phiên)", "3 Tháng tới (63 phiên)"], index=1)
 
 # NÂNG CẤP 2: NHẬP TỔNG VỐN ĐẦU TƯ (NAV)
 nav = st.number_input("💵 Nhập Tổng Vốn Đầu Tư (VNĐ):", min_value=1000000, value=100000000, step=10000000, format="%d")
@@ -125,7 +126,14 @@ show_candle = st.toggle("🕯️ Hiển thị Biểu đồ Nến Nhật (Candles
 
 window_dict = {"Theo Tuần (5 phiên)": 5, "Theo Tháng (21 phiên)": 21, "Theo Quý (63 phiên)": 63, "Theo Năm (252 phiên)": 252}
 window = window_dict[timeframe]
-future_days = 5 if "Tuần" in future_horizon else 21
+
+# Xử lý số ngày dự báo tương lai dựa trên lựa chọn
+if "Tuần" in future_horizon:
+    future_days = 5
+elif "3 Tháng" in future_horizon:
+    future_days = 63
+else:
+    future_days = 21
 
 loader = DataLoader()
 with st.spinner(f"Đang đồng bộ dữ liệu và chạy Backtest cho {symbol}..."):
@@ -230,7 +238,7 @@ if not df.empty and len(df) > 50:
     tab1, tab2 = st.tabs(["🔮 Dự báo & Khuyến nghị", "📊 Backtest & Quản trị Vốn"])
     
     # ------------------------------------
-    # TAB 1: GIAO DỊCH HIỆN TẠI (GIỮ NGUYÊN)
+    # TAB 1: GIAO DỊCH HIỆN TẠI
     # ------------------------------------
     with tab1:
         col1, col2 = st.columns([1, 2.8])
