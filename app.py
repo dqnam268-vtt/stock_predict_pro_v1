@@ -1,21 +1,22 @@
-import sys
-import os
-# Ép Python nhận diện thư mục hiện tại làm gốc để tìm thư mục 'src'
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import sys
+import os
+
+# Ép Python nhận diện thư mục hiện tại làm gốc để tìm thư mục 'src'
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from xgboost import XGBRegressor
 from src.data_loader import DataLoader
 from src.features import build_features
 from src.predictor import AIModel
 
-# Thiết lập trang
 st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-# Nút cập nhật Real-time
 if st.button("🔄 Cập nhật dữ liệu & Huấn luyện lại thuật toán (Real-time)", use_container_width=True):
     st.cache_data.clear()
 
@@ -39,6 +40,9 @@ with col_sel3:
         index=1
     )
 
+# THÊM CÔNG TẮC BẬT/TẮT NẾN NHẬT (Nằm ngay trên biểu đồ)
+show_candle = st.toggle("🕯️ Hiển thị Biểu đồ Nến Nhật (Candlestick)", value=False)
+
 window_dict = {"Theo Tuần (5 phiên)": 5, "Theo Tháng (21 phiên)": 21, "Theo Quý (63 phiên)": 63, "Theo Năm (252 phiên)": 252}
 window = window_dict[timeframe]
 future_days = 5 if "Tuần" in future_horizon else 21
@@ -47,13 +51,13 @@ future_days = 5 if "Tuần" in future_horizon else 21
 # 2. XỬ LÝ DỮ LIỆU & HUẤN LUYỆN AI
 # ==========================================
 loader = DataLoader()
-with st.spinner(f"Đang đồng bộ dữ liệu Vĩ mô, Vi mô và vẽ biểu đồ tương tác cho {symbol}..."):
+with st.spinner(f"Đang đồng bộ dữ liệu thị trường và vẽ biểu đồ đa chiều cho {symbol}..."):
     df = loader.get_data(symbol)
 
 if not df.empty and len(df) > 50:
     df_feat = build_features(df)
     
-    # Huấn luyện mô hình Phân loại (Xác suất)
+    # AI Phân loại (Xác suất)
     model = AIModel()
     model.train(df_feat)
     latest_row = df_feat.tail(1)
@@ -75,7 +79,7 @@ if not df.empty and len(df) > 50:
     else:
         corr_status = "Không có dữ liệu VN-Index"
     
-    # Chuẩn bị dữ liệu cho Mô hình Hồi quy (Auto-Regressive)
+    # AI Hồi quy (Vẽ quỹ đạo tương lai)
     df_reg = df[['close']].copy()
     for i in range(1, 6):
         df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
@@ -85,11 +89,9 @@ if not df.empty and len(df) > 50:
     X_adapt = df_reg[features_reg]
     y_adapt = df_reg['close']
     
-    # Huấn luyện mô hình Hồi quy
     reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
-    # Ngoại suy tương lai
     future_preds_adapt = []
     current_lags_adapt = df['close'].iloc[-5:].values.tolist()
     
@@ -102,7 +104,6 @@ if not df.empty and len(df) > 50:
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
 
-    # Logic Tối ưu hóa điều kiện T+3
     future_min_idx = int(np.argmin(future_preds_adapt))
     buy_date = future_dates[future_min_idx]
     buy_price = future_preds_adapt[future_min_idx]
@@ -120,81 +121,97 @@ if not df.empty and len(df) > 50:
         can_sell_T3 = True
 
     # ==========================================
-    # 3. HIỂN THỊ DASHBOARD & BIỂU ĐỒ PLOTLY
+    # 3. HIỂN THỊ DASHBOARD & BIỂU ĐỒ KÉP
     # ==========================================
-    col1, col2 = st.columns([1, 2.5])
+    col1, col2 = st.columns([1, 2.8])
     
     with col1:
         st.info("💡 Tín hiệu AI & Dòng tiền")
         st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
         st.write("---")
-        st.write(f"- **Khối lượng (VWAP):** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
-        st.write(f"- **Áp lực gom/xả (ADL):** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
+        st.write(f"- **Khối lượng:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
+        st.write(f"- **Dòng tiền:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
         st.write(f"- **Tương quan:** {corr_status}")
 
     with col2:
-        st.subheader(f"Biểu đồ Tương tác & Quỹ đạo AI - {symbol}")
+        st.subheader(f"Biểu đồ Đa chiều - {symbol}")
         
-        # 🚀 Khởi tạo biểu đồ Plotly
-        fig = go.Figure()
-        
-        # Vẽ đường giá quá khứ (lấy 150 phiên gần nhất cho nhẹ và dễ nhìn)
-        fig.add_trace(go.Scatter(
-            x=df['date'].iloc[-150:], 
-            y=df['close'].iloc[-150:],
-            mode='lines',
-            name='Giá thực tế',
-            line=dict(color='#1f77b4', width=2)
-        ))
-        
-        # Vẽ đường dự báo tương lai
-        fig.add_trace(go.Scatter(
-            x=future_dates, 
-            y=future_preds_adapt,
-            mode='lines',
-            name='AI Dự báo Tương lai',
-            line=dict(color='magenta', width=2.5, dash='dash')
-        ))
-        
-        # Điểm MUA T+3
-        fig.add_trace(go.Scatter(
-            x=[buy_date], y=[buy_price],
-            mode='markers',
-            name='Điểm MUA T+3',
-            marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))
-        ))
-        
-        # Điểm BÁN T+3
-        if can_sell_T3:
-            fig.add_trace(go.Scatter(
-                x=[sell_date], y=[sell_price],
-                mode='markers',
-                name='Điểm BÁN T+3',
-                marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))
-            ))
-            
-            # Đường nối Mua - Bán
-            fig.add_trace(go.Scatter(
-                x=[buy_date, sell_date], y=[buy_price, sell_price],
-                mode='lines',
-                name='Biên lợi nhuận',
-                line=dict(color='green', width=1.5, dash='dot')
-            ))
-        
-        # Cấu hình giao diện tương tác (Hover, Zoom, Range Slider)
-        fig.update_layout(
-            xaxis_title="Thời gian (Kéo thanh trượt bên dưới để Zoom)",
-            yaxis_title="Giá (VND)",
-            hovermode="x unified", # Bảng chi tiết hiện ra khi di chuột
-            margin=dict(l=0, r=0, t=30, b=0),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            xaxis=dict(
-                rangeslider=dict(visible=True), # Thanh trượt thời gian
-                type="date"
-            )
+        # 🚀 KHỞI TẠO BIỂU ĐỒ 2 TẦNG (Subplots)
+        fig = make_subplots(
+            rows=2, cols=1, 
+            shared_xaxes=True, 
+            vertical_spacing=0.03,
+            subplot_titles=(f"Hành vi Giá {symbol}", "Khối lượng Giao dịch (Volume)"),
+            row_width=[0.25, 0.75] # Tỷ lệ: Khung Volume chiếm 25%, Giá chiếm 75%
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Cắt dữ liệu 150 phiên gần nhất cho nhẹ mượt
+        df_plot = df.iloc[-150:]
+        
+        # --- VẼ KHUNG 1: GIÁ (NẾN HOẶC ĐƯỜNG) ---
+        if show_candle:
+            fig.add_trace(go.Candlestick(
+                x=df_plot['date'],
+                open=df_plot['open'],
+                high=df_plot['high'],
+                low=df_plot['low'],
+                close=df_plot['close'],
+                name='Nến Nhật',
+                increasing_line_color='#00CC00', # Nến tăng màu xanh lá
+                decreasing_line_color='#FF0000'  # Nến giảm màu đỏ
+            ), row=1, col=1)
+        else:
+            fig.add_trace(go.Scatter(
+                x=df_plot['date'], y=df_plot['close'],
+                mode='lines', name='Giá thực tế', line=dict(color='#1f77b4', width=2)
+            ), row=1, col=1)
+        
+        # Vẽ đường AI Tương lai
+        fig.add_trace(go.Scatter(
+            x=future_dates, y=future_preds_adapt, mode='lines', 
+            name='AI Dự báo Tương lai', line=dict(color='magenta', width=2.5, dash='dash')
+        ), row=1, col=1)
+        
+        # Vẽ điểm MUA/BÁN
+        fig.add_trace(go.Scatter(
+            x=[buy_date], y=[buy_price], mode='markers', name='Điểm MUA T+3',
+            marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))
+        ), row=1, col=1)
+        
+        if can_sell_T3:
+            fig.add_trace(go.Scatter(
+                x=[sell_date], y=[sell_price], mode='markers', name='Điểm BÁN T+3',
+                marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=[buy_date, sell_date], y=[buy_price, sell_price], mode='lines', 
+                name='Biên lợi nhuận', line=dict(color='green', width=1.5, dash='dot')
+            ), row=1, col=1)
+
+        # --- VẼ KHUNG 2: KHỐI LƯỢNG GIAO DỊCH (VOLUME) ---
+        # Đổ màu khối lượng: Xanh nếu Giá Đóng >= Giá Mở, Đỏ nếu Giá Đóng < Giá Mở
+        volume_colors = ['#00CC00' if row['close'] >= row['open'] else '#FF0000' for _, row in df_plot.iterrows()]
+        
+        fig.add_trace(go.Bar(
+            x=df_plot['date'],
+            y=df_plot['volume'],
+            marker_color=volume_colors,
+            name='Khối lượng'
+        ), row=2, col=1)
+        
+        # Tùy chỉnh Layout & Tương tác
+        fig.update_layout(
+            xaxis_title="Thời gian (Cuộn chuột để Zoom, Kéo để Di chuyển)",
+            hovermode="x unified",
+            margin=dict(l=0, r=0, t=30, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            dragmode="pan"
+        )
+        
+        # Tắt rangeslider mặc định của Candlestick (để không che mất biểu đồ Volume)
+        fig.update_layout(xaxis_rangeslider_visible=False)
+        
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     # ==========================================
     # 4. XUẤT BÁO CÁO DẠNG TEXT (TRADE PLAN)
@@ -230,4 +247,4 @@ if not df.empty and len(df) > 50:
     st.info(report_text)
 
 else:
-    st.error("Không thể kết nối dữ liệu hoặc dữ liệu quá ngắn để huấn luyện.")
+    st.error("Không thể kết nối dữ liệu hoặc dữ liệu quá ngắn.")
