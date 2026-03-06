@@ -13,6 +13,19 @@ import requests
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ==========================================
+# CẤU TRÚC DANH MỤC NHÓM NGÀNH (MỚI)
+# ==========================================
+INDUSTRIES = {
+    "🏦 Ngân hàng": ["VCB", "BID", "CTG", "MBB", "TCB", "VPB", "ACB", "STB", "SHB", "HDB"],
+    "📈 Chứng khoán": ["SSI", "VND", "HCM", "VCI", "VIX", "SHS", "MBS", "FTS", "BSI"],
+    "🏢 Bất động sản & KCN": ["VHM", "VIC", "VRE", "NVL", "DIG", "DXG", "KBC", "PDR", "IDC", "SZC"],
+    "🏗️ Thép & Xây dựng": ["HPG", "HSG", "NKG", "HT1", "BCC", "VCG", "CTD", "HBC"],
+    "🛒 Bán lẻ & Công nghệ": ["FPT", "MWG", "PNJ", "DGW", "FRT", "CMG"],
+    "🛢️ Dầu khí & Năng lượng": ["GAS", "PVD", "PVS", "BSR", "POW", "PLX", "NT2"],
+    "🚢 Cảng biển & Thủy sản": ["HAH", "GMD", "VSC", "VHC", "ANV", "FMC"]
+}
+
+# ==========================================
 # HÀM GỬI CẢNH BÁO TELEGRAM
 # ==========================================
 def send_telegram_alert(bot_token, chat_id, message):
@@ -126,49 +139,52 @@ def analyze_symbol(symbol, future_days):
 st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 
 with st.sidebar:
-    st.header("🤖 Cài đặt Telegram Bot")
+    st.header("🤖 Telegram Bot")
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-        st.success("✅ Đã kết nối khóa bảo mật Streamlit!")
+        st.success("✅ Đã kết nối khóa bảo mật!")
     except:
-        bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
-        chat_id = st.text_input("💬 Chat ID của bạn:")
+        bot_token = st.text_input("🔑 Bot Token:", type="password")
+        chat_id = st.text_input("💬 Chat ID:")
     
-    if st.button("🔔 Gửi tin nhắn Test", use_container_width=True):
+    if st.button("🔔 Gửi Test", use_container_width=True):
         if bot_token and chat_id:
-            if send_telegram_alert(bot_token, chat_id, "✅ *Tuyệt vời!*\nHệ thống AI Quant đang hoạt động tốt."):
+            if send_telegram_alert(bot_token, chat_id, "✅ Hệ thống AI Quant đang hoạt động."):
                 st.success("Đã gửi tin nhắn test!")
             else: st.error("Gửi thất bại.")
-        else: st.warning("Vui lòng cấu hình Bot.")
     st.markdown("---")
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Cập nhật Dữ liệu Real-time (Xóa bộ nhớ đệm)", use_container_width=True):
+if st.button("🔄 Cập nhật Dữ liệu Real-time (Làm mới AI)", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã tải lại dữ liệu mới nhất. Radar sẽ quét lại từ đầu!")
+    st.success("Đã tải lại dữ liệu mới nhất. Radar sẽ cập nhật lại từ đầu!")
 
-col_sel1, col_sel2, col_sel3 = st.columns(3)
-with col_sel1:
-    tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT", "VIX"]
-    symbol = st.selectbox("🎯 Chọn mã cổ phiếu (Xem chi tiết):", tickers)
-with col_sel2:
-    timeframe = st.selectbox("🔙 Dò tìm Cực trị:", ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], index=1)
-with col_sel3:
-    future_horizon = st.selectbox("🔮 AI Dự báo Tương lai:", ["1 Tuần tới (5 phiên)", "1 Tháng tới (21 phiên)", "3 Tháng tới (63 phiên)"], index=1)
+# CẤU TRÚC GIAO DIỆN CHỌN NGÀNH & MÃ
+col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+with col_s1:
+    selected_sector = st.selectbox("📊 Chọn Nhóm Ngành:", list(INDUSTRIES.keys()))
+    current_tickers = INDUSTRIES[selected_sector]
+with col_s2:
+    symbol = st.selectbox("🎯 Chọn Mã (Chi tiết):", current_tickers)
+with col_s3:
+    timeframe = st.selectbox("🔙 Dò Cực trị:", ["Theo Tuần", "Theo Tháng", "Theo Quý", "Theo Năm"], index=1)
+with col_s4:
+    future_horizon = st.selectbox("🔮 Dự báo Tương lai:", ["1 Tuần tới", "1 Tháng tới", "3 Tháng tới"], index=1)
 
-nav = st.number_input("💵 Nhập Tổng Vốn Đầu Tư (VNĐ):", min_value=1000000, value=100000000, step=10000000, format="%d")
-show_candle = st.toggle("🕯️ Hiển thị Biểu đồ Nến Nhật", value=False)
-
-window_dict = {"Theo Tuần (5 phiên)": 5, "Theo Tháng (21 phiên)": 21, "Theo Quý (63 phiên)": 63, "Theo Năm (252 phiên)": 252}
-window = window_dict[timeframe]
+col_nav1, col_nav2 = st.columns([1, 3])
+with col_nav1:
+    nav = st.number_input("💵 Vốn Đầu Tư (VNĐ):", min_value=1000000, value=100000000, step=10000000, format="%d")
+with col_nav2:
+    st.write("") # Dòng trống để căn lề
+    show_candle = st.toggle("🕯️ Biểu đồ Nến Nhật", value=False)
 
 if "Tuần" in future_horizon: future_days = 5
 elif "3 Tháng" in future_horizon: future_days = 63
 else: future_days = 21
 
-bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "Toàn bộ lịch sử (3 Năm)": 750}
+bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "Toàn bộ lịch sử": 750}
 
 with st.spinner(f"Đang phân tích {symbol}..."):
     result = analyze_symbol(symbol, future_days)
@@ -210,18 +226,14 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    # -------------------------------------------------------------
-    # KHAI BÁO 5 TAB TÁCH BIỆT CHUYÊN NGHIỆP
-    # -------------------------------------------------------------
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔮 Dự báo Chi tiết", 
         "📊 Backtest (Mã Hiện Tại)", 
         "🏆 Radar Tín Hiệu (Telegram)",
-        "📈 Bảng Phong Thần Toàn TT",
+        "📈 Bảng Xếp Hạng Cổ Phiếu",
         "🧠 Trạng thái Học Máy AI"
     ])
     
-    # === TAB 1: DỰ BÁO CHI TIẾT (Cho mã đang chọn) ===
     with tab1:
         col1, col2 = st.columns([1, 2.8])
         with col1:
@@ -257,15 +269,9 @@ if result is not None:
 
         st.success(f"**Bản ghi nhớ:** {symbol} - Khuyến nghị đi vốn: {kelly_pct:.1f}% ({shares_to_buy:,} CP)")
 
-    # === TAB 2: BACKTEST CHO MÃ ĐANG CHỌN ===
     with tab2:
         st.subheader(f"Mô phỏng Giao dịch Thực tế theo AI - Mã {symbol}")
-        
-        bt_timeframe_single = st.selectbox(
-            "⏳ Chọn chu kỳ muốn kiểm tra lại:", 
-            ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử (3 Năm)"], 
-            index=1, key="bt_single"
-        )
+        bt_timeframe_single = st.selectbox("⏳ Chọn chu kỳ kiểm tra:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_single")
         
         bt_days_single = bt_days_dict[bt_timeframe_single]
         bt_df_current = df_feat.tail(bt_days_single).copy()
@@ -277,30 +283,35 @@ if result is not None:
         bt_df_current['strategy_equity'] = nav * np.exp(bt_df_current['strategy_return'].fillna(0).cumsum())
         
         fig_bt = go.Figure()
-        fig_bt.add_trace(go.Scatter(x=bt_df_current['date'], y=bt_df_current['strategy_equity'], mode='lines', name='Vốn nếu theo AI', line=dict(color='magenta', width=2.5)))
-        fig_bt.add_trace(go.Scatter(x=bt_df_current['date'], y=bt_df_current['bnh_equity'], mode='lines', name='Vốn nếu Tự ôm', line=dict(color='gray', width=1.5, dash='dot')))
+        fig_bt.add_trace(go.Scatter(x=bt_df_current['date'], y=bt_df_current['strategy_equity'], mode='lines', name='Vốn AI', line=dict(color='magenta', width=2.5)))
+        fig_bt.add_trace(go.Scatter(x=bt_df_current['date'], y=bt_df_current['bnh_equity'], mode='lines', name='Vốn Tự ôm', line=dict(color='gray', width=1.5, dash='dot')))
         fig_bt.add_hline(y=nav, line_dash="dash", line_color="red", annotation_text="Vốn Ban Đầu", annotation_position="bottom right")
 
-        fig_bt.update_layout(
-            yaxis_title="Tổng Tài Sản (VND)", hovermode="x unified",
-            margin=dict(l=0, r=0, t=30, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+        fig_bt.update_layout(yaxis_title="Tổng Tài Sản (VND)", hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         
         profit_vnd_single = bt_df_current['strategy_equity'].iloc[-1] - nav
         st.metric(f"Lãi/Lỗ Thực tế ({bt_timeframe_single})", f"{profit_vnd_single:,.0f} đ")
         st.plotly_chart(fig_bt, use_container_width=True)
 
-    # === TAB 3: RADAR CẢNH BÁO TELEGRAM ===
     with tab3:
-        st.subheader("🏆 Radar Quét Tín Hiệu & Báo Cáo Telegram")
-        st.write("Radar sẽ đánh giá cả 10 mã và gửi báo cáo phân loại (Nên Mua / Nên Đứng Ngoài) thẳng về điện thoại.")
+        st.subheader(f"🏆 Radar Tín Hiệu (Ngành: {selected_sector})")
+        st.write("AI sẽ sắp xếp các mã từ mạnh nhất đến yếu nhất dựa trên công thức Kelly và Xác suất tăng.")
         
-        if st.button("🚀 Quét Toàn Bộ & Báo cáo Bot"):
+        col_btn1, col_btn2 = st.columns(2)
+        scan_mode = "sector"
+        with col_btn1:
+            if st.button(f"🔍 Quét Nhanh Ngành {selected_sector}"): scan_mode = "sector"
+        with col_btn2:
+            if st.button("🌍 Quét CHẬM Toàn Bộ 50 Mã Cổ Phiếu"): scan_mode = "all"
+            
+        if st.button("🚀 Bắt đầu Quét & Nhắn Telegram", type="primary"):
+            target_tickers = current_tickers if scan_mode == "sector" else [tic for sublist in INDUSTRIES.values() for tic in sublist]
+            
             progress_bar = st.progress(0)
             radar_results = []
             good_stocks, bad_stocks = [], []
             
-            for i, sym in enumerate(tickers):
+            for i, sym in enumerate(target_tickers):
                 res = analyze_symbol(sym, future_days)
                 if not res: continue
                 
@@ -323,10 +334,10 @@ if result is not None:
                     "Giá Canh Mua": buy_p
                 })
                 
-                if scan_kelly > 0: good_stocks.append(f"✅ *{sym}* | Đợi Mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}% | Kelly: {scan_kelly:.1f}% vốn")
-                else: bad_stocks.append(f"➖ _{sym}_ | TT Xấu / Đứng ngoài quan sát")
+                if scan_kelly > 0: good_stocks.append(f"✅ *{sym}* | Đợi Mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}% | Kelly: {scan_kelly:.1f}%")
+                else: bad_stocks.append(f"➖ _{sym}_ | Đứng ngoài quan sát")
                 
-                progress_bar.progress((i + 1) / len(tickers))
+                progress_bar.progress((i + 1) / len(target_tickers))
                 
             progress_bar.empty()
             
@@ -335,106 +346,68 @@ if result is not None:
                 st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
                 
                 if bot_token and chat_id:
-                    final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n\n"
+                    final_msg = f"🏆 *BÁO CÁO RADAR {'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'}* 🏆\n\n"
                     if len(good_stocks) > 0:
                         final_msg += "🎯 *DANH MỤC ĐẠT CHUẨN MUA:*\n" + "\n".join(good_stocks) + "\n\n"
                     else:
                         final_msg += "⚠️ *KHÔNG CÓ MÃ ĐẠT CHUẨN MUA.*\n(Thị trường rủi ro, nên cầm tiền mặt)\n\n"
-                    final_msg += "📊 *TRẠNG THÁI CÁC MÃ CÒN LẠI:*\n" + "\n".join(bad_stocks)
                     
                     send_telegram_alert(bot_token, chat_id, final_msg)
-                    st.toast("Đã gửi báo cáo tổng hợp chi tiết qua Telegram!", icon="✈️")
-                else:
-                    st.info("Quét hoàn tất. Hãy cài đặt Bot ở Sidebar để nhận tin nhắn.")
+                    st.toast("Đã gửi báo cáo Telegram!", icon="✈️")
 
-    # === TAB 4: BẢNG PHONG THẦN (BACKTEST TOÀN BỘ 10 MÃ) ===
     with tab4:
-        st.subheader("📈 Bảng Phong Thần: Kiểm định Hiệu suất Toàn Thị Trường")
-        
-        bt_timeframe_all = st.selectbox(
-            "⏳ Chọn chu kỳ muốn kiểm định cho tất cả 10 mã cổ phiếu:", 
-            ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử (3 Năm)"], 
-            index=1, key="bt_all"
-        )
+        st.subheader(f"📈 Bảng Phong Thần: Hiệu suất Nhóm {selected_sector}")
+        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ kiểm định cho nhóm ngành này:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
-        with st.spinner("Đang tự động chấm điểm Lãi/Lỗ của toàn bộ thị trường..."):
-            all_bt_results = []
-            
-            for sym in tickers:
-                res_bt = analyze_symbol(sym, future_days)
-                if not res_bt: continue
-                
-                df_f_bt = res_bt['df_feat']
-                bt_days_actual = min(bt_days_all, len(df_f_bt))
-                
-                bt_df = df_f_bt.tail(bt_days_actual).copy()
-                bt_probs = res_bt['all_probs'][-bt_days_actual:]
-                
-                bt_df['prob'] = bt_probs
-                bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0)
-                bt_df['daily_return'] = bt_df['returns']
-                bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
-                
-                bt_df['bnh_equity'] = nav * np.exp(bt_df['daily_return'].cumsum())
-                bt_df['strategy_equity'] = nav * np.exp(bt_df['strategy_return'].fillna(0).cumsum())
-                
-                final_equity = bt_df['strategy_equity'].iloc[-1]
-                profit_vnd = final_equity - nav
-                profit_pct = (final_equity / nav - 1) * 100
-                bnh_profit_pct = (bt_df['bnh_equity'].iloc[-1] / nav - 1) * 100
-                
-                roll_max = bt_df['strategy_equity'].cummax()
-                max_dd = (bt_df['strategy_equity'] / roll_max - 1).min() * 100
-                
-                winning_days = len(bt_df[(bt_df['signal'].shift(1) == 1) & (bt_df['daily_return'] > 0)])
-                total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
-                win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
-                
-                all_bt_results.append({
-                    "Mã CP": sym,
-                    "Lãi/Lỗ Thực Tế (VNĐ)": profit_vnd,
-                    "Hiệu suất AI": profit_pct / 100,
-                    "So với Mua & Giữ": (profit_pct - bnh_profit_pct) / 100,
-                    "Tỷ lệ Thắng": win_rate / 100,
-                    "Rủi ro (Drawdown)": max_dd / 100
-                })
+        if st.button("🔄 Chạy Backtest Nhóm Ngành", type="secondary"):
+            with st.spinner("Đang tự động chấm điểm Lãi/Lỗ..."):
+                all_bt_results = []
+                for sym in current_tickers:
+                    res_bt = analyze_symbol(sym, future_days)
+                    if not res_bt: continue
+                    
+                    df_f_bt = res_bt['df_feat']
+                    bt_days_actual = min(bt_days_all, len(df_f_bt))
+                    
+                    bt_df = df_f_bt.tail(bt_days_actual).copy()
+                    bt_probs = res_bt['all_probs'][-bt_days_actual:]
+                    
+                    bt_df['prob'] = bt_probs
+                    bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0)
+                    bt_df['daily_return'] = bt_df['returns']
+                    bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
+                    
+                    bt_df['bnh_equity'] = nav * np.exp(bt_df['daily_return'].cumsum())
+                    bt_df['strategy_equity'] = nav * np.exp(bt_df['strategy_return'].fillna(0).cumsum())
+                    
+                    final_equity = bt_df['strategy_equity'].iloc[-1]
+                    profit_pct = (final_equity / nav - 1) * 100
+                    bnh_profit_pct = (bt_df['bnh_equity'].iloc[-1] / nav - 1) * 100
+                    
+                    roll_max = bt_df['strategy_equity'].cummax()
+                    max_dd = (bt_df['strategy_equity'] / roll_max - 1).min() * 100
+                    
+                    winning_days = len(bt_df[(bt_df['signal'].shift(1) == 1) & (bt_df['daily_return'] > 0)])
+                    total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
+                    win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
+                    
+                    all_bt_results.append({
+                        "Mã CP": sym, "Hiệu suất AI": profit_pct / 100,
+                        "So với Mua & Giữ": (profit_pct - bnh_profit_pct) / 100,
+                        "Tỷ lệ Thắng": win_rate / 100, "Rủi ro (Drawdown)": max_dd / 100
+                    })
 
-        if all_bt_results:
-            df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
-            st.dataframe(
-                df_bt_all.style.format({
-                    "Lãi/Lỗ Thực Tế (VNĐ)": "{:,.0f} đ",
-                    "Hiệu suất AI": "{:+.2%}",
-                    "So với Mua & Giữ": "{:+.2%}",
-                    "Tỷ lệ Thắng": "{:.1%}",
-                    "Rủi ro (Drawdown)": "{:.1%}"
-                }).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"),
-                use_container_width=True, height=400
-            )
+            if all_bt_results:
+                df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
+                st.dataframe(df_bt_all.style.format({"Hiệu suất AI": "{:+.2%}", "So với Mua & Giữ": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Rủi ro (Drawdown)": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"), use_container_width=True)
 
-    # === TAB 5: TRẠNG THÁI HỌC MÁY AI ===
     with tab5:
-        st.subheader("🧠 Trạng thái Hoạt động của Trí tuệ Nhân tạo (AI Status)")
-        st.write("Bảng điều khiển này giúp giám sát khối lượng công việc phân tích mà hệ thống đang vận hành ngầm.")
-        
+        st.subheader("🧠 Trạng thái Hoạt động của Trí tuệ Nhân tạo")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
-        col_ai1.metric("Thuật toán Lõi", "XGBoost Machine Learning")
-        col_ai2.metric("Khối lượng Dữ liệu Lịch sử", f"{result['data_rows']} phiên giao dịch")
-        col_ai3.metric("Số lượng Đặc trưng (Features)", f"{result['features_count']} biến số toán học")
-        
-        st.progress(100, text="✅ Mô hình đã phân tích và hội tụ xong. Đang xuất tín hiệu giao dịch...")
-        
-        st.markdown("---")
-        st.markdown("**Danh sách các biến định lượng (Features) đang nuôi AI:**")
-        st.code("""
-1. returns       (Tỷ suất sinh lợi)
-2. volatility    (Độ biến động giá)
-3. z_score       (Độ lệch chuẩn so với trung bình)
-4. macd_hist     (Động lượng xu hướng MACD)
-5. hurst         (Chỉ số vỡ bọt Hurst Exponent)
-6. adl_zscore    (Áp lực Mua/Bán của Cá mập)
-7. price_to_vwap (Độ chênh lệch giá so với Dòng tiền)
-        """)
+        col_ai1.metric("Thuật toán Lõi", "XGBoost ML")
+        col_ai2.metric("Dữ liệu Lịch sử (Features)", f"{result['data_rows']} phiên x {result['features_count']} biến")
+        col_ai3.metric("Số lượng Mã hệ thống", f"{sum(len(v) for v in INDUSTRIES.values())} mã (7 Ngành)")
+        st.progress(100, text="✅ Mô hình đã phân tích và hội tụ xong.")
 
 else: st.error("Không thể kết nối dữ liệu.")
