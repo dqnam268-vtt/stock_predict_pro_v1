@@ -31,7 +31,6 @@ class DataLoader:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        # Chỉ tải dữ liệu cổ phiếu, KHÔNG tải VNINDEX nữa để tránh lỗi Yahoo
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(start=start_date, end=end_date)
         if df.empty: return pd.DataFrame()
@@ -78,7 +77,6 @@ def build_features(df):
 class AIModel:
     def __init__(self):
         self.model = XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
-        # Loại bỏ vn_returns và market_corr khỏi không gian học của AI
         self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap']
     def train(self, df):
         df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
@@ -96,7 +94,10 @@ def analyze_symbol(symbol, future_days):
     
     model = AIModel()
     model.train(df_feat)
-    prob = model.predict_prob(df_feat.tail(1))[0]
+    
+    # Lấy xác suất của toàn bộ lịch sử (Dùng cho Backtest)
+    all_probs = model.predict_prob(df_feat)
+    prob = all_probs[-1] # Tín hiệu phiên hiện tại
     
     df_reg = df[['close']].copy()
     for i in range(1, 6): df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
@@ -116,7 +117,7 @@ def analyze_symbol(symbol, future_days):
         current_lags_adapt.pop(0)
         current_lags_adapt.append(float(pred))
         
-    return {'df': df, 'df_feat': df_feat, 'prob': prob, 'future_preds_adapt': future_preds_adapt}
+    return {'df': df, 'df_feat': df_feat, 'prob': prob, 'all_probs': all_probs, 'future_preds_adapt': future_preds_adapt}
 
 # ==========================================
 # PHẦN 2: GIAO DIỆN APP (UI)
@@ -173,6 +174,7 @@ if result is not None:
     df = result['df']
     df_feat = result['df_feat']
     prob = result['prob']
+    all_probs = result['all_probs']
     future_preds_adapt = result['future_preds_adapt']
     
     latest_row = df_feat.tail(1)
@@ -205,7 +207,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest", "🏆 Radar Quét Toàn Thị Trường"])
+    tab1, tab2, tab3 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Hiệu suất Đầu tư (Backtest)", "🏆 Radar Quét Toàn Thị Trường"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -213,8 +215,8 @@ if result is not None:
             st.info("💡 Tín hiệu AI & Dòng tiền")
             st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
             st.write("---")
-            st.write(f"- **Khối lượng (VWAP):** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
-            st.write(f"- **Dòng tiền (ADL):** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
+            st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
+            st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
 
         with col2:
             st.subheader(f"Biểu đồ Đa chiều - {symbol}")
@@ -242,7 +244,80 @@ if result is not None:
 
         st.success(f"**Bản ghi nhớ:** {symbol} - Khuyến nghị đi vốn: {kelly_pct:.1f}% ({shares_to_buy:,} CP)")
 
-    with tab2: st.subheader("Tính năng Backtest (Đang bảo trì để ưu tiên tốc độ Bot)")
+    # ------------------------------------
+    # TAB 2: BACKTEST (MÔ PHỎNG LÃI/LỖ QUÁ KHỨ)
+    # ------------------------------------
+    with tab2:
+        st.subheader(f"Mô phỏng Giao dịch Thực tế theo AI - Mã {symbol}")
+        
+        # Bảng chọn khoảng thời gian Backtest
+        bt_timeframe = st.selectbox(
+            "⏳ Chọn chu kỳ muốn kiểm tra lại:", 
+            ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử (3 Năm)"], 
+            index=1
+        )
+        
+        bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "Toàn bộ lịch sử (3 Năm)": len(df_feat)}
+        bt_days = bt_days_dict[bt_timeframe]
+        
+        # Cắt dữ liệu theo thời gian chọn
+        bt_df = df_feat.tail(bt_days).copy()
+        bt_probs = all_probs[-bt_days:]
+        
+        # Gán xác suất và tạo tín hiệu mua (>55% là mua)
+        bt_df['prob'] = bt_probs
+        bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0)
+        
+        # Tính toán Lãi/Lỗ
+        bt_df['daily_return'] = bt_df['returns']
+        bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
+        
+        # Cộng dồn lãi kép dựa trên NAV người dùng nhập
+        bt_df['bnh_equity'] = nav * np.exp(bt_df['daily_return'].cumsum())
+        bt_df['strategy_equity'] = nav * np.exp(bt_df['strategy_return'].fillna(0).cumsum())
+        
+        final_equity = bt_df['strategy_equity'].iloc[-1]
+        profit_vnd = final_equity - nav
+        profit_pct = (final_equity / nav - 1) * 100
+        
+        bnh_equity = bt_df['bnh_equity'].iloc[-1]
+        bnh_profit_pct = (bnh_equity / nav - 1) * 100
+        
+        # Tính Rủi ro (Drawdown)
+        roll_max = bt_df['strategy_equity'].cummax()
+        drawdown = bt_df['strategy_equity'] / roll_max - 1
+        max_dd = drawdown.min() * 100
+        
+        # Tính Tỷ lệ Thắng
+        winning_days = len(bt_df[(bt_df['signal'].shift(1) == 1) & (bt_df['daily_return'] > 0)])
+        total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
+        win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
+
+        # Hiển thị Kết quả
+        col_bt1, col_bt2, col_bt3, col_bt4 = st.columns(4)
+        col_bt1.metric("Tổng Lãi/Lỗ Thực Tế", f"{profit_vnd:,.0f} đ", f"{profit_pct:+.2f}%")
+        col_bt2.metric("So với Mua xong Vứt đó", f"{bnh_profit_pct:+.2f}%", delta="Hiệu suất Mua & Giữ", delta_color="off")
+        col_bt3.metric("Xác suất Đánh Trúng", f"{win_rate:.1f}%")
+        col_bt4.metric("Chịu đựng Sụt giảm (Rủi ro)", f"{max_dd:.1f}%", delta="Drawdown", delta_color="inverse")
+        
+        # Vẽ biểu đồ đường cong Vốn
+        fig_bt = go.Figure()
+        fig_bt.add_trace(go.Scatter(x=bt_df['date'], y=bt_df['strategy_equity'], mode='lines', name='Vốn nếu theo AI', line=dict(color='magenta', width=2.5)))
+        fig_bt.add_trace(go.Scatter(x=bt_df['date'], y=bt_df['bnh_equity'], mode='lines', name='Vốn nếu Tự ôm', line=dict(color='gray', width=1.5, dash='dot')))
+        
+        # Thêm đường ngang thể hiện Vốn gốc (Mốc hòa vốn)
+        fig_bt.add_hline(y=nav, line_dash="dash", line_color="red", annotation_text="Vốn Ban Đầu", annotation_position="bottom right")
+
+        fig_bt.update_layout(
+            title=f"Đồ thị Tăng trưởng Tài khoản ({bt_timeframe})",
+            yaxis_title="Tổng Tài Sản (VND)",
+            hovermode="x unified",
+            margin=dict(l=0, r=0, t=40, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_bt, use_container_width=True)
+        
+        st.caption(f"ℹ️ *Giải thích:* Nếu {bt_timeframe.lower()}, thầy mang **{nav:,.0f} đ** giao cho bot tự động mua/bán mã {symbol}, hôm nay thầy sẽ mang về tổng cộng **{final_equity:,.0f} đ**.")
 
     # ------------------------------------
     # TAB 3: RADAR QUÉT & CẢNH BÁO TỰ ĐỘNG
@@ -254,7 +329,6 @@ if result is not None:
         if st.button("🚀 Quét Toàn Bộ & Báo cáo Bot"):
             progress_bar = st.progress(0)
             radar_results = []
-            
             good_stocks = []
             bad_stocks = []
             
@@ -297,7 +371,6 @@ if result is not None:
                 
                 if bot_token and chat_id:
                     final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n\n"
-                    
                     if len(good_stocks) > 0:
                         final_msg += "🎯 *DANH MỤC ĐẠT CHUẨN MUA:*\n"
                         final_msg += "\n".join(good_stocks) + "\n\n"
