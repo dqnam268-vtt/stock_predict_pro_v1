@@ -23,7 +23,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: CÁC MODULE TOÁN HỌC & DỮ LIỆU
+# PHẦN 1: CÁC MODULE TOÁN HỌC & DỮ LIỆU (ĐÃ LƯỢC BỎ VN-INDEX)
 # ==========================================
 class DataLoader:
     def get_data(self, symbol, days=1095):
@@ -31,6 +31,7 @@ class DataLoader:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
+        # Chỉ tải dữ liệu cổ phiếu, KHÔNG tải VNINDEX nữa để tránh lỗi Yahoo
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(start=start_date, end=end_date)
         if df.empty: return pd.DataFrame()
@@ -40,18 +41,6 @@ class DataLoader:
         if 'date' in df.columns and df['date'].dt.tz is not None:
             df['date'] = df['date'].dt.tz_localize(None)
             
-        vn_ticker = yf.Ticker("^VNINDEX")
-        vn_df = vn_ticker.history(start=start_date, end=end_date)
-        if not vn_df.empty:
-            vn_df.reset_index(inplace=True)
-            vn_df.columns = [c.lower() for c in vn_df.columns]
-            if 'date' in vn_df.columns and vn_df['date'].dt.tz is not None:
-                vn_df['date'] = vn_df['date'].dt.tz_localize(None)
-            vn_df = vn_df[['date', 'close']].rename(columns={'close': 'vn_close'})
-            df = pd.merge(df, vn_df, on='date', how='left')
-            df['vn_close'] = df['vn_close'].ffill()
-        else:
-            df['vn_close'] = 1000 
         return df
 
 def build_features(df):
@@ -84,18 +73,13 @@ def build_features(df):
     df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
     df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
     
-    if 'vn_close' in df.columns:
-        df['vn_returns'] = np.log(df['vn_close'] / df['vn_close'].shift(1))
-        df['market_corr'] = df['returns'].rolling(window=21).corr(df['vn_returns'])
-        df['market_corr'] = df['market_corr'].fillna(0)
-    else:
-        df['vn_returns'] = 0; df['market_corr'] = 0
     return df.dropna()
 
 class AIModel:
     def __init__(self):
         self.model = XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
-        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'vn_returns', 'market_corr']
+        # Loại bỏ vn_returns và market_corr khỏi không gian học của AI
+        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap']
     def train(self, df):
         df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
         df = df.dropna()
@@ -195,13 +179,6 @@ if result is not None:
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
-    
-    if 'market_corr' in latest_row.columns and latest_row['vn_close'].values[0] != 1000:
-        market_corr = latest_row['market_corr'].values[0]
-        if market_corr > 0.6: corr_status = f"Đồng pha VN-Index ({market_corr:.2f})"
-        elif market_corr < -0.3: corr_status = f"Ngược pha VN-Index ({market_corr:.2f})"
-        else: corr_status = f"Ít phụ thuộc ({market_corr:.2f})"
-    else: corr_status = "⚠️ Lỗi VN-Index"
         
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
@@ -236,9 +213,8 @@ if result is not None:
             st.info("💡 Tín hiệu AI & Dòng tiền")
             st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
             st.write("---")
-            st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
-            st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
-            st.write(f"- **Tương quan:** {corr_status}")
+            st.write(f"- **Khối lượng (VWAP):** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
+            st.write(f"- **Dòng tiền (ADL):** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
 
         with col2:
             st.subheader(f"Biểu đồ Đa chiều - {symbol}")
@@ -279,7 +255,6 @@ if result is not None:
             progress_bar = st.progress(0)
             radar_results = []
             
-            # Khởi tạo 2 danh sách riêng biệt
             good_stocks = []
             bad_stocks = []
             
@@ -307,7 +282,6 @@ if result is not None:
                     "Giá Canh Mua": buy_p
                 })
                 
-                # PHÂN LOẠI MÃ CHO BÁO CÁO TELEGRAM
                 if scan_kelly > 0:
                     good_stocks.append(f"✅ *{sym}* | Đợi Mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}% | Kelly: {scan_kelly:.1f}% vốn")
                 else:
@@ -321,7 +295,6 @@ if result is not None:
                 radar_df = pd.DataFrame(radar_results).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
                 st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
                 
-                # GỬI BÁO CÁO TỔNG HỢP QUA TELEGRAM
                 if bot_token and chat_id:
                     final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n\n"
                     
