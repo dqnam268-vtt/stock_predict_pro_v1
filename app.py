@@ -130,9 +130,21 @@ with st.sidebar:
     st.write("Nhập thông tin để nhận cảnh báo tự động:")
     bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
     chat_id = st.text_input("💬 Chat ID của bạn:")
+    
+    # --- THÊM NÚT TEST TẠI ĐÂY ---
+    if st.button("🔔 Gửi tin nhắn Test", use_container_width=True):
+        if bot_token and chat_id:
+            test_msg = "✅ *Tuyệt vời!*\nHệ thống AI Quant đã kết nối thành công với điện thoại của thầy Nam. Bot đang trong trạng thái sẵn sàng săn mồi!"
+            success = send_telegram_alert(bot_token, chat_id, test_msg)
+            if success:
+                st.success("Đã gửi tin nhắn test! Thầy kiểm tra điện thoại nhé.")
+            else:
+                st.error("Gửi thất bại. Thầy kiểm tra lại Token, Chat ID hoặc xem đã bấm /start với bot chưa.")
+        else:
+            st.warning("Thầy vui lòng nhập đủ Token và Chat ID trước khi test.")
+            
     st.markdown("---")
     st.caption("AI sẽ kiểm tra tín hiệu mỗi khi dữ liệu được cập nhật và gửi tin nhắn nếu thỏa mãn điều kiện mua.")
-
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
 if st.button("🔄 Cập nhật dữ liệu & Quét Tín hiệu", use_container_width=True):
