@@ -103,7 +103,6 @@ class AIModel:
     def predict_prob(self, df):
         return self.model.predict_proba(df[self.features])[:, 1]
 
-# Caching để lưu RAM
 @st.cache_data(ttl=900, show_spinner=False)
 def analyze_symbol(symbol, future_days):
     df = DataLoader().get_data(symbol)
@@ -142,7 +141,6 @@ st.set_page_config(page_title="AI Quant - Cảnh Báo", layout="wide")
 
 with st.sidebar:
     st.header("🤖 Cài đặt Telegram Bot")
-    # ĐỂ BẢO MẬT: Thầy có thể sử dụng st.secrets hoặc điền trực tiếp vào đây nếu chạy Local
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
@@ -187,7 +185,6 @@ else: future_days = 21
 with st.spinner(f"Đang phân tích {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
-# --- Xử lý cho Tab 1 (Xem chi tiết 1 mã) ---
 if result is not None:
     df = result['df']
     df_feat = result['df_feat']
@@ -226,7 +223,7 @@ if result is not None:
 
     kelly_pct = 0
     if can_sell_T3 and profit_pct > 0:
-        b = profit_pct / 5.0 # Mức stoploss mặc định 5%
+        b = profit_pct / 5.0
         if b > 0: kelly_pct = max(0, (prob - ((1 - prob) / b)) / 2) * 100 
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
@@ -276,12 +273,15 @@ if result is not None:
     # ------------------------------------
     with tab3:
         st.subheader("🏆 Radar Toàn Thị Trường & Cảnh Báo Telegram")
-        st.write("Radar sẽ đánh giá cả 10 mã. Mã nào đủ chuẩn Kelly > 0, Bot sẽ tự động gửi báo cáo tóm tắt về điện thoại.")
+        st.write("Radar sẽ đánh giá cả 10 mã và gửi báo cáo phân loại (Nên Mua / Nên Đứng Ngoài) thẳng về điện thoại.")
         
         if st.button("🚀 Quét Toàn Bộ & Báo cáo Bot"):
             progress_bar = st.progress(0)
             radar_results = []
-            alert_stocks = [] # Danh sách gom các mã thỏa điều kiện nhắn tin
+            
+            # Khởi tạo 2 danh sách riêng biệt
+            good_stocks = []
+            bad_stocks = []
             
             for i, sym in enumerate(tickers):
                 res = analyze_symbol(sym, future_days)
@@ -307,28 +307,35 @@ if result is not None:
                     "Giá Canh Mua": buy_p
                 })
                 
-                # NẾU KELLY > 0 -> Đưa vào danh sách gửi Telegram
+                # PHÂN LOẠI MÃ CHO BÁO CÁO TELEGRAM
                 if scan_kelly > 0:
-                    alert_stocks.append(f"🔹 *{sym}*: Tỷ trọng an toàn {scan_kelly:.1f}% | Canh mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}%")
+                    good_stocks.append(f"✅ *{sym}* | Đợi Mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}% | Kelly: {scan_kelly:.1f}% vốn")
+                else:
+                    bad_stocks.append(f"➖ _{sym}_ | TT Xấu / Đứng ngoài quan sát")
                 
                 progress_bar.progress((i + 1) / len(tickers))
                 
             progress_bar.empty()
             
-            # Xử lý hiện bảng trên Web
             if radar_results:
                 radar_df = pd.DataFrame(radar_results).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
                 st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
                 
-                # Xử lý gửi Telegram tổng hợp
+                # GỬI BÁO CÁO TỔNG HỢP QUA TELEGRAM
                 if bot_token and chat_id:
-                    if len(alert_stocks) > 0:
-                        final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n_Hệ thống vừa phát hiện các mã đạt tiêu chuẩn mua:_\n\n"
-                        final_msg += "\n".join(alert_stocks)
-                        send_telegram_alert(bot_token, chat_id, final_msg)
-                        st.toast("Đã gửi báo cáo tổng hợp qua Telegram!", icon="✈️")
+                    final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n\n"
+                    
+                    if len(good_stocks) > 0:
+                        final_msg += "🎯 *DANH MỤC ĐẠT CHUẨN MUA:*\n"
+                        final_msg += "\n".join(good_stocks) + "\n\n"
                     else:
-                        st.warning("Đã quét xong. Không có mã nào đủ an toàn để báo cáo Bot.")
+                        final_msg += "⚠️ *KHÔNG CÓ MÃ ĐẠT CHUẨN MUA.*\n(Thị trường rủi ro, nên cầm tiền mặt)\n\n"
+                    
+                    final_msg += "📊 *TRẠNG THÁI CÁC MÃ CÒN LẠI:*\n"
+                    final_msg += "\n".join(bad_stocks)
+                    
+                    send_telegram_alert(bot_token, chat_id, final_msg)
+                    st.toast("Đã gửi báo cáo tổng hợp chi tiết qua Telegram!", icon="✈️")
                 else:
-                    st.info("Quét hoàn tất. Hãy cài đặt Bot ở Sidebar để nhận tin nhắn tự động.")
+                    st.info("Quét hoàn tất. Hãy cài đặt Bot ở Sidebar để nhận tin nhắn.")
 else: st.error("Không thể kết nối dữ liệu.")
