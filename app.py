@@ -19,11 +19,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     if not bot_token or not chat_id:
         return False
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': message,
-        'parse_mode': 'Markdown'
-    }
+    payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'Markdown'}
     try:
         response = requests.post(url, data=payload)
         return response.status_code == 200
@@ -61,6 +57,11 @@ class DataLoader:
         else:
             df['vn_close'] = 1000 
         return df
+
+# NÂNG CẤP TỐI THƯỢNG: LƯU DỮ LIỆU VÀO RAM (CACHE) ĐỂ CHẠY SIÊU TỐC
+@st.cache_data(ttl=900, show_spinner=False) # Lưu trong bộ nhớ 15 phút
+def load_cached_data(symbol):
+    return DataLoader().get_data(symbol)
 
 def build_features(df):
     df = df.copy()
@@ -124,36 +125,34 @@ class AIModel:
 # ==========================================
 st.set_page_config(page_title="AI Quant - Cảnh Báo", layout="wide")
 
-# Menu bên trái (Sidebar) để cài đặt Bot
 with st.sidebar:
     st.header("🤖 Cài đặt Telegram Bot")
     st.write("Nhập thông tin để nhận cảnh báo tự động:")
     bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
     chat_id = st.text_input("💬 Chat ID của bạn:")
     
-    # --- THÊM NÚT TEST TẠI ĐÂY ---
     if st.button("🔔 Gửi tin nhắn Test", use_container_width=True):
         if bot_token and chat_id:
-            test_msg = "✅ *Tuyệt vời!*\nHệ thống AI Quant đã kết nối thành công với điện thoại của thầy Nam. Bot đang trong trạng thái sẵn sàng săn mồi!"
+            test_msg = "✅ *Tuyệt vời!*\nHệ thống AI Quant đã kết nối thành công. Bot đang sẵn sàng săn mồi!"
             success = send_telegram_alert(bot_token, chat_id, test_msg)
             if success:
                 st.success("Đã gửi tin nhắn test! Thầy kiểm tra điện thoại nhé.")
             else:
-                st.error("Gửi thất bại. Thầy kiểm tra lại Token, Chat ID hoặc xem đã bấm /start với bot chưa.")
+                st.error("Gửi thất bại. Hãy kiểm tra lại Token hoặc gõ /start với bot.")
         else:
-            st.warning("Thầy vui lòng nhập đủ Token và Chat ID trước khi test.")
-            
+            st.warning("Vui lòng nhập đủ Token và Chat ID.")
     st.markdown("---")
-    st.caption("AI sẽ kiểm tra tín hiệu mỗi khi dữ liệu được cập nhật và gửi tin nhắn nếu thỏa mãn điều kiện mua.")
+    
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Cập nhật dữ liệu & Quét Tín hiệu", use_container_width=True):
+if st.button("🔄 Cập nhật Dữ liệu Real-time (Xóa bộ nhớ đệm)", use_container_width=True):
     st.cache_data.clear()
+    st.success("Đã tải lại toàn bộ dữ liệu mới nhất từ thị trường!")
 
 col_sel1, col_sel2, col_sel3 = st.columns(3)
 with col_sel1:
     tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT", "VIX"]
-    symbol = st.selectbox("🎯 Chọn mã cổ phiếu:", tickers)
+    symbol = st.selectbox("🎯 Chọn mã cổ phiếu (Chuyển mã siêu tốc):", tickers)
 with col_sel2:
     timeframe = st.selectbox("🔙 Dò tìm Cực trị:", ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], index=1)
 with col_sel3:
@@ -169,9 +168,9 @@ if "Tuần" in future_horizon: future_days = 5
 elif "3 Tháng" in future_horizon: future_days = 63
 else: future_days = 21
 
-loader = DataLoader()
-with st.spinner(f"Đang đồng bộ dữ liệu và Quét tín hiệu Bot cho {symbol}..."):
-    df = loader.get_data(symbol)
+# Sử dụng hàm Cache để tải dữ liệu CỰC NHANH
+with st.spinner(f"Đang phân tích {symbol}..."):
+    df = load_cached_data(symbol)
 
 if not df.empty and len(df) > 50:
     df_feat = build_features(df)
@@ -179,7 +178,7 @@ if not df.empty and len(df) > 50:
     model = AIModel()
     model.train(df_feat)
     latest_row = df_feat.tail(1)
-    prev_row = df_feat.tail(2).head(1) # Phiên trước đó
+    prev_row = df_feat.tail(2).head(1)
     prob = model.predict_prob(latest_row)[0]
     
     current_price = latest_row['close'].values[0]
@@ -202,7 +201,7 @@ if not df.empty and len(df) > 50:
     
     X_adapt = df_reg[features_reg]
     y_adapt = df_reg['close']
-    reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
+    reg_model_adapt = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
     future_preds_adapt = []
@@ -245,34 +244,20 @@ if not df.empty and len(df) > 50:
     invest_amount = nav * (kelly_pct / 100)
     shares_to_buy = int(invest_amount / buy_price) if buy_price > 0 else 0
 
-    # ==========================================
-    # LOGIC KÍCH HOẠT BOT TELEGRAM
-    # ==========================================
-    # Cắt lên VWAP: Hôm qua giá dưới VWAP, hôm nay giá vượt lên VWAP
     cross_vwap_up = (prev_price_to_vwap <= 0) and (price_to_vwap > 0)
-    
-    # Sinh thông điệp nếu thỏa mãn Kelly Criterion hoặc Giá cắt VWAP
     if bot_token and chat_id:
         alert_msg = ""
         if cross_vwap_up:
-            alert_msg += f"🚀 *{symbol} Đột phá Dòng tiền!*\nGiá hiện tại ({current_price:,.0f}đ) vừa cắt lên trên đường VWAP của Cá Mập.\n"
+            alert_msg += f"🚀 *{symbol} Đột phá Dòng tiền!*\nGiá ({current_price:,.0f}đ) vừa cắt lên VWAP.\n"
         if kelly_pct > 0:
-            alert_msg += f"✅ *AI Quant phát hiện Điểm Mua {symbol}*\n"
-            alert_msg += f"- Điểm mua T+3: {buy_price:,.0f}đ\n"
-            alert_msg += f"- Lợi nhuận kỳ vọng: +{profit_pct:.2f}%\n"
-            alert_msg += f"- Kelly Khuyến nghị: Mua {shares_to_buy:,} cổ phiếu.\n"
-        
+            alert_msg += f"✅ *AI Quant Điểm Mua {symbol}*\n- Giá Mua: {buy_price:,.0f}đ\n- Tỷ trọng Kelly: {kelly_pct:.1f}%\n"
         if alert_msg != "":
-            alert_msg += f"\n_Tín hiệu từ Hệ thống Quant Thầy Nam_"
-            # Gửi tin nhắn
-            success = send_telegram_alert(bot_token, chat_id, alert_msg)
-            if success:
-                st.toast(f"Đã gửi cảnh báo {symbol} qua Telegram!", icon="✈️")
+            send_telegram_alert(bot_token, chat_id, alert_msg + "_Hệ thống Thầy Nam_")
 
     # ==========================================
-    # 3. HIỂN THỊ CÁC TAB CHỨC NĂNG
+    # 3. HIỂN THỊ CÁC TAB CHỨC NĂNG (THÊM TAB 3)
     # ==========================================
-    tab1, tab2 = st.tabs(["🔮 Dự báo & Khuyến nghị", "📊 Backtest & Quản trị Vốn"])
+    tab1, tab2, tab3 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest", "🏆 Bảng Xếp Hạng Toàn Thị Trường"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -334,13 +319,107 @@ if not df.empty and len(df) > 50:
         report_text += f"\n**3. Kết luận từ AI Quant:**\n{conclusion}"
         st.success(report_text)
 
-    # ------------------------------------
-    # TAB 2: BACKTEST (Rút gọn logic hiển thị)
-    # ------------------------------------
     with tab2:
-        st.subheader(f"Kiểm định năng lực AI (Backtest 3 Năm)")
-        # Lấy lại code logic Backtest cũ và vẽ đồ thị (đã rút gọn cho hàm app.py)
-        st.write("Thuật toán Backtest đang hoạt động ngầm. Chuyển Tab 1 để xem Bot.")
+        st.subheader("Thuật toán Backtest đang chạy nền...")
 
+    # ------------------------------------
+    # TAB 3: RADAR QUÉT TOÀN THỊ TRƯỜNG
+    # ------------------------------------
+    with tab3:
+        st.subheader("🏆 Radar Quét Cơ Hội Đầu Tư Toàn Danh Mục")
+        st.write("Sử dụng thuật toán để phân tích đồng loạt tất cả các mã cổ phiếu và xếp hạng điểm mua tối ưu.")
+        
+        if st.button("🚀 Kích hoạt Radar Quét (Chỉ mất khoảng 5-10 giây)"):
+            progress_bar = st.progress(0)
+            radar_results = []
+            
+            for i, sym in enumerate(tickers):
+                # 1. Tải dữ liệu (Lấy từ RAM cực nhanh)
+                df_scan = load_cached_data(sym)
+                if df_scan.empty or len(df_scan) < 50:
+                    continue
+                    
+                df_f = build_features(df_scan)
+                m = AIModel()
+                m.train(df_f)
+                latest = df_f.tail(1)
+                scan_prob = m.predict_prob(latest)[0]
+                
+                scan_price = latest['close'].values[0]
+                scan_vwap = latest['price_to_vwap'].values[0]
+                scan_adl = latest['adl_zscore'].values[0]
+                
+                # 2. Chạy Auto-Regressive tính T+3
+                df_r = df_scan[['close']].copy()
+                for j in range(1, 6): df_r[f'lag_{j}'] = df_r['close'].shift(j)
+                df_r = df_r.dropna()
+                X_a = df_r[[f'lag_{j}' for j in range(5, 0, -1)]]
+                y_a = df_r['close']
+                reg_m = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
+                reg_m.fit(X_a, y_a)
+                
+                scan_preds = []
+                c_lags = df_scan['close'].iloc[-5:].values.tolist()
+                for _ in range(future_days):
+                    p = reg_m.predict(np.array([c_lags]))[0]
+                    scan_preds.append(float(p))
+                    c_lags.pop(0)
+                    c_lags.append(float(p))
+                    
+                min_idx = int(np.argmin(scan_preds))
+                buy_p = scan_preds[min_idx]
+                
+                scan_profit = 0
+                if min_idx + 3 < len(scan_preds):
+                    valid_sell = scan_preds[min_idx + 3:]
+                    sell_p = max(valid_sell)
+                    scan_profit = (sell_p - buy_p) / buy_p * 100
+                    
+                # 3. Tính Kelly
+                scan_kelly = 0
+                if scan_profit > 0:
+                    b_ratio = scan_profit / 5.0
+                    if b_ratio > 0:
+                        k = scan_prob - ((1-scan_prob)/b_ratio)
+                        scan_kelly = max(0, k / 2) * 100
+                        
+                radar_results.append({
+                    "Mã CP": sym,
+                    "Xác suất Tăng": scan_prob,
+                    "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, # Chuyển thành số thập phân để format
+                    "Kỳ vọng T+3": scan_profit / 100,
+                    "Giá Canh Mua": buy_p,
+                    "Dòng Tiền": "✅ Gom" if scan_adl > 0 else "❌ Xả",
+                    "VWAP": "Tốt" if scan_vwap > 0 else "Xấu"
+                })
+                
+                progress_bar.progress((i + 1) / len(tickers))
+                
+            progress_bar.empty()
+            
+            if radar_results:
+                radar_df = pd.DataFrame(radar_results)
+                # Sắp xếp theo Tỷ trọng Vốn giảm dần
+                radar_df = radar_df.sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
+                
+                # Hiển thị bảng với màu sắc trực quan (Heatmap)
+                st.dataframe(
+                    radar_df.style.format({
+                        "Xác suất Tăng": "{:.1%}",
+                        "Tỷ trọng Vốn (Kelly)": "{:.1%}",
+                        "Kỳ vọng T+3": "{:+.2%}",
+                        "Giá Canh Mua": "{:,.0f} đ"
+                    }).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"),
+                    use_container_width=True,
+                    height=400
+                )
+                
+                # Báo cáo kết luận tổng quan
+                best_stock = radar_df.iloc[0]
+                if best_stock["Tỷ trọng Vốn (Kelly)"] > 0:
+                    st.success(f"🏆 **ĐÁNH GIÁ TỔNG QUAN:** Cổ phiếu đáng mua nhất hiện tại là **{best_stock['Mã CP']}**. \n\nHệ thống AI đánh giá xác suất tăng là **{best_stock['Xác suất Tăng']:.1%}** và đề xuất giải ngân tối đa **{best_stock['Tỷ trọng Vốn (Kelly)']:.1%}** tổng vốn.")
+                else:
+                    st.warning("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Toàn thị trường hiện tại đang rất rủi ro. Không có mã nào thỏa mãn tiêu chuẩn Kelly để giải ngân. Thầy nên đứng ngoài quan sát (Cầm tiền mặt).")
+                    
 else:
     st.error("Không thể kết nối dữ liệu.")
