@@ -13,7 +13,7 @@ import requests
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ==========================================
-# CẤU TRÚC DANH MỤC NHÓM NGÀNH (MỚI)
+# CẤU TRÚC DANH MỤC NHÓM NGÀNH
 # ==========================================
 INDUSTRIES = {
     "🏦 Ngân hàng": ["VCB", "BID", "CTG", "MBB", "TCB", "VPB", "ACB", "STB", "SHB", "HDB"],
@@ -161,7 +161,6 @@ if st.button("🔄 Cập nhật Dữ liệu Real-time (Làm mới AI)", use_cont
     st.cache_data.clear()
     st.success("Đã tải lại dữ liệu mới nhất. Radar sẽ cập nhật lại từ đầu!")
 
-# CẤU TRÚC GIAO DIỆN CHỌN NGÀNH & MÃ
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
     selected_sector = st.selectbox("📊 Chọn Nhóm Ngành:", list(INDUSTRIES.keys()))
@@ -177,7 +176,7 @@ col_nav1, col_nav2 = st.columns([1, 3])
 with col_nav1:
     nav = st.number_input("💵 Vốn Đầu Tư (VNĐ):", min_value=1000000, value=100000000, step=10000000, format="%d")
 with col_nav2:
-    st.write("") # Dòng trống để căn lề
+    st.write("") 
     show_candle = st.toggle("🕯️ Biểu đồ Nến Nhật", value=False)
 
 if "Tuần" in future_horizon: future_days = 5
@@ -230,10 +229,11 @@ if result is not None:
         "🔮 Dự báo Chi tiết", 
         "📊 Backtest (Mã Hiện Tại)", 
         "🏆 Radar Tín Hiệu (Telegram)",
-        "📈 Bảng Xếp Hạng Cổ Phiếu",
+        "📈 Bảng Xếp Hạng Ngành",
         "🧠 Trạng thái Học Máy AI"
     ])
     
+    # === TAB 1: DỰ BÁO CHI TIẾT ===
     with tab1:
         col1, col2 = st.columns([1, 2.8])
         with col1:
@@ -269,6 +269,7 @@ if result is not None:
 
         st.success(f"**Bản ghi nhớ:** {symbol} - Khuyến nghị đi vốn: {kelly_pct:.1f}% ({shares_to_buy:,} CP)")
 
+    # === TAB 2: BACKTEST CHO MÃ ĐANG CHỌN ===
     with tab2:
         st.subheader(f"Mô phỏng Giao dịch Thực tế theo AI - Mã {symbol}")
         bt_timeframe_single = st.selectbox("⏳ Chọn chu kỳ kiểm tra:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_single")
@@ -293,23 +294,29 @@ if result is not None:
         st.metric(f"Lãi/Lỗ Thực tế ({bt_timeframe_single})", f"{profit_vnd_single:,.0f} đ")
         st.plotly_chart(fig_bt, use_container_width=True)
 
+    # === TAB 3: RADAR CẢNH BÁO TELEGRAM (CHỈ LỌC TOP 5) ===
     with tab3:
-        st.subheader(f"🏆 Radar Tín Hiệu (Ngành: {selected_sector})")
-        st.write("AI sẽ sắp xếp các mã từ mạnh nhất đến yếu nhất dựa trên công thức Kelly và Xác suất tăng.")
+        st.subheader("🏆 Radar Tín Hiệu & Báo Cáo Telegram (Lọc Top 5)")
+        st.write("Hệ thống sẽ tự động quét, xếp hạng và **chỉ gửi 5 mã có điểm mua tối ưu nhất** về Telegram để thầy không bị rối thông tin.")
         
         col_btn1, col_btn2 = st.columns(2)
+        run_scan = False
         scan_mode = "sector"
+        
         with col_btn1:
-            if st.button(f"🔍 Quét Nhanh Ngành {selected_sector}"): scan_mode = "sector"
+            if st.button(f"🔍 Quét Top 5 Ngành {selected_sector}", type="primary"):
+                run_scan = True
+                scan_mode = "sector"
         with col_btn2:
-            if st.button("🌍 Quét CHẬM Toàn Bộ 50 Mã Cổ Phiếu"): scan_mode = "all"
-            
-        if st.button("🚀 Bắt đầu Quét & Nhắn Telegram", type="primary"):
+            if st.button("🌍 Quét Top 5 Toàn Bộ 50 Mã", type="primary"):
+                run_scan = True
+                scan_mode = "all"
+                
+        if run_scan:
             target_tickers = current_tickers if scan_mode == "sector" else [tic for sublist in INDUSTRIES.values() for tic in sublist]
             
             progress_bar = st.progress(0)
             radar_results = []
-            good_stocks, bad_stocks = [], []
             
             for i, sym in enumerate(target_tickers):
                 res = analyze_symbol(sym, future_days)
@@ -333,30 +340,42 @@ if result is not None:
                     "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, "Kỳ vọng T+3": scan_profit / 100,
                     "Giá Canh Mua": buy_p
                 })
-                
-                if scan_kelly > 0: good_stocks.append(f"✅ *{sym}* | Đợi Mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}% | Kelly: {scan_kelly:.1f}%")
-                else: bad_stocks.append(f"➖ _{sym}_ | Đứng ngoài quan sát")
-                
                 progress_bar.progress((i + 1) / len(target_tickers))
                 
             progress_bar.empty()
             
             if radar_results:
+                # Sắp xếp các mã theo thứ tự mạnh nhất (Kelly giảm dần)
                 radar_df = pd.DataFrame(radar_results).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
                 st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
                 
                 if bot_token and chat_id:
-                    final_msg = f"🏆 *BÁO CÁO RADAR {'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'}* 🏆\n\n"
-                    if len(good_stocks) > 0:
-                        final_msg += "🎯 *DANH MỤC ĐẠT CHUẨN MUA:*\n" + "\n".join(good_stocks) + "\n\n"
+                    # TÁCH LỌC TOP 5 MÃ TỐT NHẤT
+                    buyable_df = radar_df[radar_df["Tỷ trọng Vốn (Kelly)"] > 0]
+                    top_5_df = buyable_df.head(5)
+                    
+                    final_msg = f"🏆 *BÁO CÁO TOP 5 TỐI ƯU ({'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'})* 🏆\n\n"
+                    
+                    if not top_5_df.empty:
+                        final_msg += "🎯 *DANH MỤC TOP KHUYẾN NGHỊ MUA:*\n"
+                        for _, row in top_5_df.iterrows():
+                            sym = row['Mã CP']
+                            buy_p = row['Giá Canh Mua']
+                            profit = row['Kỳ vọng T+3'] * 100
+                            kelly = row['Tỷ trọng Vốn (Kelly)'] * 100
+                            final_msg += f"✅ *{sym}* | Mua: {buy_p:,.0f}đ | Kỳ vọng: +{profit:.2f}% | Kelly: {kelly:.1f}%\n"
+                        
+                        if len(buyable_df) > 5:
+                            final_msg += f"\n_(Còn {len(buyable_df) - 5} mã khác đạt chuẩn nhưng tỷ trọng thấp hơn, vui lòng xem trên Web)_"
                     else:
-                        final_msg += "⚠️ *KHÔNG CÓ MÃ ĐẠT CHUẨN MUA.*\n(Thị trường rủi ro, nên cầm tiền mặt)\n\n"
+                        final_msg += "⚠️ *KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA.*\n(Thị trường rủi ro, nên cầm tiền mặt)\n"
                     
                     send_telegram_alert(bot_token, chat_id, final_msg)
-                    st.toast("Đã gửi báo cáo Telegram!", icon="✈️")
+                    st.toast("Đã lọc và gửi báo cáo Top 5 qua Telegram!", icon="✈️")
 
+    # === TAB 4: BẢNG PHONG THẦN (BACKTEST THEO NGÀNH) ===
     with tab4:
-        st.subheader(f"📈 Bảng Phong Thần: Hiệu suất Nhóm {selected_sector}")
+        st.subheader(f"📈 Bảng Xếp Hạng: Hiệu suất Nhóm {selected_sector}")
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ kiểm định cho nhóm ngành này:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
@@ -376,7 +395,7 @@ if result is not None:
                     bt_df['prob'] = bt_probs
                     bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0)
                     bt_df['daily_return'] = bt_df['returns']
-                    bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
+                    bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df_current['daily_return']
                     
                     bt_df['bnh_equity'] = nav * np.exp(bt_df['daily_return'].cumsum())
                     bt_df['strategy_equity'] = nav * np.exp(bt_df['strategy_return'].fillna(0).cumsum())
@@ -402,6 +421,7 @@ if result is not None:
                 df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
                 st.dataframe(df_bt_all.style.format({"Hiệu suất AI": "{:+.2%}", "So với Mua & Giữ": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Rủi ro (Drawdown)": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"), use_container_width=True)
 
+    # === TAB 5: TRẠNG THÁI HỌC MÁY AI ===
     with tab5:
         st.subheader("🧠 Trạng thái Hoạt động của Trí tuệ Nhân tạo")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
