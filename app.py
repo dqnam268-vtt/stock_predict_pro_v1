@@ -16,15 +16,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # HÀM GỬI CẢNH BÁO TELEGRAM
 # ==========================================
 def send_telegram_alert(bot_token, chat_id, message):
-    if not bot_token or not chat_id:
-        return False
+    if not bot_token or not chat_id: return False
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'Markdown'}
-    try:
-        response = requests.post(url, data=payload)
-        return response.status_code == 200
-    except:
-        return False
+    try: return requests.post(url, data=payload).status_code == 200
+    except: return False
 
 # ==========================================
 # PHẦN 1: CÁC MODULE TOÁN HỌC & DỮ LIỆU
@@ -58,16 +54,10 @@ class DataLoader:
             df['vn_close'] = 1000 
         return df
 
-# NÂNG CẤP TỐI THƯỢNG: LƯU DỮ LIỆU VÀO RAM (CACHE) ĐỂ CHẠY SIÊU TỐC
-@st.cache_data(ttl=900, show_spinner=False) # Lưu trong bộ nhớ 15 phút
-def load_cached_data(symbol):
-    return DataLoader().get_data(symbol)
-
 def build_features(df):
     df = df.copy()
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=21).std() * np.sqrt(252)
-    
     ma20 = df['close'].rolling(window=20).mean()
     std20 = df['close'].rolling(window=20).std()
     df['z_score'] = (df['close'] - ma20) / std20
@@ -82,7 +72,6 @@ def build_features(df):
         lags = range(2, 20)
         tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
         return np.polyfit(np.log(lags), np.log(tau), 1)[0] * 2.0
-
     df['hurst'] = df['close'].rolling(window=100).apply(get_hurst, raw=True)
     
     high_low_diff = df['high'] - df['low']
@@ -100,25 +89,51 @@ def build_features(df):
         df['market_corr'] = df['returns'].rolling(window=21).corr(df['vn_returns'])
         df['market_corr'] = df['market_corr'].fillna(0)
     else:
-        df['vn_returns'] = 0
-        df['market_corr'] = 0
+        df['vn_returns'] = 0; df['market_corr'] = 0
     return df.dropna()
 
 class AIModel:
     def __init__(self):
-        self.model = XGBClassifier(
-            n_estimators=200, max_depth=5, learning_rate=0.03,
-            subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42
-        )
+        self.model = XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
         self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'vn_returns', 'market_corr']
-
     def train(self, df):
         df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
         df = df.dropna()
         self.model.fit(df[self.features], df['target'])
-        
     def predict_prob(self, df):
         return self.model.predict_proba(df[self.features])[:, 1]
+
+# Caching để lưu RAM
+@st.cache_data(ttl=900, show_spinner=False)
+def analyze_symbol(symbol, future_days):
+    df = DataLoader().get_data(symbol)
+    if df.empty or len(df) < 50: return None
+    
+    df_feat = build_features(df)
+    
+    model = AIModel()
+    model.train(df_feat)
+    prob = model.predict_prob(df_feat.tail(1))[0]
+    
+    df_reg = df[['close']].copy()
+    for i in range(1, 6): df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
+    df_reg = df_reg.dropna()
+    features_reg = [f'lag_{5}', f'lag_{4}', f'lag_{3}', f'lag_{2}', f'lag_{1}']
+    
+    X_adapt = df_reg[features_reg]
+    y_adapt = df_reg['close']
+    reg_model_adapt = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
+    reg_model_adapt.fit(X_adapt, y_adapt)
+    
+    future_preds_adapt = []
+    current_lags_adapt = df['close'].iloc[-5:].values.tolist()
+    for _ in range(future_days):
+        pred = reg_model_adapt.predict(np.array([current_lags_adapt]))[0]
+        future_preds_adapt.append(float(pred))
+        current_lags_adapt.pop(0)
+        current_lags_adapt.append(float(pred))
+        
+    return {'df': df, 'df_feat': df_feat, 'prob': prob, 'future_preds_adapt': future_preds_adapt}
 
 # ==========================================
 # PHẦN 2: GIAO DIỆN APP (UI)
@@ -127,37 +142,33 @@ st.set_page_config(page_title="AI Quant - Cảnh Báo", layout="wide")
 
 with st.sidebar:
     st.header("🤖 Cài đặt Telegram Bot")
-    
-    # Gọi dữ liệu tự động từ bộ nhớ khóa bảo mật của Streamlit
+    # ĐỂ BẢO MẬT: Thầy có thể sử dụng st.secrets hoặc điền trực tiếp vào đây nếu chạy Local
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-        st.success("✅ Đã tải cấu hình Bot bảo mật thành công!")
+        st.success("✅ Đã kết nối khóa bảo mật Streamlit!")
     except:
-        bot_token = ""
-        chat_id = ""
-        st.error("⚠️ Chưa tìm thấy khóa bảo mật (Secrets).")
-
+        bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
+        chat_id = st.text_input("💬 Chat ID của bạn:")
+    
     if st.button("🔔 Gửi tin nhắn Test", use_container_width=True):
         if bot_token and chat_id:
-            test_msg = "✅ *Tuyệt vời!*\nHệ thống AI Quant đã kết nối thành công. Bot đang sẵn sàng săn mồi!"
-            success = send_telegram_alert(bot_token, chat_id, test_msg)
-            if success:
-                st.success("Đã gửi tin nhắn test! Bạn kiểm tra điện thoại nhé.")
-            else:
-                st.error("Gửi thất bại. Hãy kiểm tra lại Token hoặc gõ /start với bot.")
+            if send_telegram_alert(bot_token, chat_id, "✅ *Tuyệt vời!*\nHệ thống AI Quant đang hoạt động tốt."):
+                st.success("Đã gửi tin nhắn test!")
+            else: st.error("Gửi thất bại.")
+        else: st.warning("Vui lòng cấu hình Bot.")
     st.markdown("---")
     
-st.title(" Hệ thống Dự báo AI Quant")
+st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
 if st.button("🔄 Cập nhật Dữ liệu Real-time (Xóa bộ nhớ đệm)", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã tải lại toàn bộ dữ liệu mới nhất từ thị trường!")
+    st.success("Đã tải lại dữ liệu mới nhất. Radar sẽ quét lại từ đầu!")
 
 col_sel1, col_sel2, col_sel3 = st.columns(3)
 with col_sel1:
     tickers = ["GAS", "HT1", "VCB", "MBB", "BID", "SSI", "VND", "HCM", "FPT", "VIX"]
-    symbol = st.selectbox("🎯 Chọn mã cổ phiếu (Chuyển mã siêu tốc):", tickers)
+    symbol = st.selectbox("🎯 Chọn mã cổ phiếu (Xem chi tiết):", tickers)
 with col_sel2:
     timeframe = st.selectbox("🔙 Dò tìm Cực trị:", ["Theo Tuần (5 phiên)", "Theo Tháng (21 phiên)", "Theo Quý (63 phiên)", "Theo Năm (252 phiên)"], index=1)
 with col_sel3:
@@ -173,50 +184,27 @@ if "Tuần" in future_horizon: future_days = 5
 elif "3 Tháng" in future_horizon: future_days = 63
 else: future_days = 21
 
-# Sử dụng hàm Cache để tải dữ liệu CỰC NHANH
 with st.spinner(f"Đang phân tích {symbol}..."):
-    df = load_cached_data(symbol)
+    result = analyze_symbol(symbol, future_days)
 
-if not df.empty and len(df) > 50:
-    df_feat = build_features(df)
+# --- Xử lý cho Tab 1 (Xem chi tiết 1 mã) ---
+if result is not None:
+    df = result['df']
+    df_feat = result['df_feat']
+    prob = result['prob']
+    future_preds_adapt = result['future_preds_adapt']
     
-    model = AIModel()
-    model.train(df_feat)
     latest_row = df_feat.tail(1)
-    prev_row = df_feat.tail(2).head(1)
-    prob = model.predict_prob(latest_row)[0]
-    
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
-    prev_price_to_vwap = prev_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
     
     if 'market_corr' in latest_row.columns and latest_row['vn_close'].values[0] != 1000:
         market_corr = latest_row['market_corr'].values[0]
-        if market_corr > 0.6: corr_status = f"Đồng pha mạnh VN-Index ({market_corr:.2f})"
-        elif market_corr < -0.3: corr_status = f"Đi ngược VN-Index ({market_corr:.2f})"
-        else: corr_status = f"Ít phụ thuộc VN-Index ({market_corr:.2f})"
-    else:
-        corr_status = "⚠️ Lỗi dữ liệu VN-Index"
-        
-    df_reg = df[['close']].copy()
-    for i in range(1, 6): df_reg[f'lag_{i}'] = df_reg['close'].shift(i)
-    df_reg = df_reg.dropna()
-    features_reg = [f'lag_{5}', f'lag_{4}', f'lag_{3}', f'lag_{2}', f'lag_{1}']
-    
-    X_adapt = df_reg[features_reg]
-    y_adapt = df_reg['close']
-    reg_model_adapt = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
-    reg_model_adapt.fit(X_adapt, y_adapt)
-    
-    future_preds_adapt = []
-    current_lags_adapt = df['close'].iloc[-5:].values.tolist()
-    
-    for _ in range(future_days):
-        pred = reg_model_adapt.predict(np.array([current_lags_adapt]))[0]
-        future_preds_adapt.append(float(pred))
-        current_lags_adapt.pop(0)
-        current_lags_adapt.append(float(pred))
+        if market_corr > 0.6: corr_status = f"Đồng pha VN-Index ({market_corr:.2f})"
+        elif market_corr < -0.3: corr_status = f"Ngược pha VN-Index ({market_corr:.2f})"
+        else: corr_status = f"Ít phụ thuộc ({market_corr:.2f})"
+    else: corr_status = "⚠️ Lỗi VN-Index"
         
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
@@ -236,33 +224,14 @@ if not df.empty and len(df) > 50:
         profit_pct = (sell_price - buy_price) / buy_price * 100
         can_sell_T3 = True
 
-    stop_loss_pct = 5.0
     kelly_pct = 0
     if can_sell_T3 and profit_pct > 0:
-        b = profit_pct / stop_loss_pct 
-        p = prob 
-        q = 1 - p 
-        if b > 0:
-            kelly_f = p - (q / b)
-            kelly_pct = max(0, kelly_f / 2) * 100 
+        b = profit_pct / 5.0 # Mức stoploss mặc định 5%
+        if b > 0: kelly_pct = max(0, (prob - ((1 - prob) / b)) / 2) * 100 
 
-    invest_amount = nav * (kelly_pct / 100)
-    shares_to_buy = int(invest_amount / buy_price) if buy_price > 0 else 0
+    shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    cross_vwap_up = (prev_price_to_vwap <= 0) and (price_to_vwap > 0)
-    if bot_token and chat_id:
-        alert_msg = ""
-        if cross_vwap_up:
-            alert_msg += f"🚀 *{symbol} Đột phá Dòng tiền!*\nGiá ({current_price:,.0f}đ) vừa cắt lên VWAP.\n"
-        if kelly_pct > 0:
-            alert_msg += f"✅ *AI Quant Điểm Mua {symbol}*\n- Giá Mua: {buy_price:,.0f}đ\n- Tỷ trọng Kelly: {kelly_pct:.1f}%\n"
-        if alert_msg != "":
-            send_telegram_alert(bot_token, chat_id, alert_msg + "_Hệ thống Thầy Nam_")
-
-    # ==========================================
-    # 3. HIỂN THỊ CÁC TAB CHỨC NĂNG (THÊM TAB 3)
-    # ==========================================
-    tab1, tab2, tab3 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest", "🏆 Bảng Xếp Hạng Toàn Thị Trường"])
+    tab1, tab2, tab3 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest", "🏆 Radar Quét Toàn Thị Trường"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -270,8 +239,8 @@ if not df.empty and len(df) > 50:
             st.info("💡 Tín hiệu AI & Dòng tiền")
             st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
             st.write("---")
-            st.write(f"- **Khối lượng (VWAP):** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
-            st.write(f"- **Dòng tiền (ADL):** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
+            st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
+            st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
             st.write(f"- **Tương quan:** {corr_status}")
 
         with col2:
@@ -298,133 +267,68 @@ if not df.empty and len(df) > 50:
             fig.update_layout(xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-        st.markdown("---")
-        st.subheader("📝 BẢN GHI NHỚ GIAO DỊCH (TRADE PLAN)")
-        
-        conclusion = ""
-        if prob > 0.6 and can_sell_T3 and profit_pct > 1.5 and adl_zscore > 0:
-            conclusion = "🌟 **RẤT TÍCH CỰC:** Hội tụ đủ yếu tố kỹ thuật, dòng tiền lớn đang gom. Hệ thống Kelly cho phép mở vị thế."
-        elif prob > 0.5 and can_sell_T3 and profit_pct > 0:
-            conclusion = "⚖️ **TRUNG LẬP:** Có biên lợi nhuận T+3 nhưng rủi ro cao. Khuyến nghị đi vốn nhỏ."
-        else:
-            conclusion = "⛔ **ĐỨNG NGOÀI:** Rủi ro lớn hơn Lợi nhuận. Thuật toán Kelly đề xuất KHÔNG giải ngân."
+        st.success(f"**Bản ghi nhớ:** {symbol} - Khuyến nghị đi vốn: {kelly_pct:.1f}% ({shares_to_buy:,} CP)")
 
-        report_text = f"**1. Kế hoạch lướt sóng (Ngoại suy T+3):**\n"
-        report_text += f"- 🟢 **Điểm chờ MUA:** Quanh vùng **{buy_price:,.0f} đ**\n"
-        if can_sell_T3:
-            report_text += f"- 🔴 **Điểm chờ BÁN:** Quanh vùng **{sell_price:,.0f} đ**\n"
-            report_text += f"- 🎯 **Biên lợi nhuận kỳ vọng:** **{profit_pct:+.2f}%**\n"
-        
-        report_text += f"\n**2. Quản trị Vốn (Kelly):**\n"
-        if kelly_pct > 0:
-            report_text += f"- **Khuyến nghị giải ngân:** Mua **{shares_to_buy:,}** cổ phiếu ({kelly_pct:.1f}% vốn).\n"
-        else:
-            report_text += f"- **Tỷ trọng an toàn:** **0%**.\n"
-
-        report_text += f"\n**3. Kết luận từ AI Quant:**\n{conclusion}"
-        st.success(report_text)
-
-    with tab2:
-        st.subheader("Thuật toán Backtest đang chạy nền...")
+    with tab2: st.subheader("Tính năng Backtest (Đang bảo trì để ưu tiên tốc độ Bot)")
 
     # ------------------------------------
-    # TAB 3: RADAR QUÉT TOÀN THỊ TRƯỜNG
+    # TAB 3: RADAR QUÉT & CẢNH BÁO TỰ ĐỘNG
     # ------------------------------------
     with tab3:
-        st.subheader("🏆 Radar Quét Cơ Hội Đầu Tư Toàn Danh Mục")
-        st.write("Sử dụng thuật toán để phân tích đồng loạt tất cả các mã cổ phiếu và xếp hạng điểm mua tối ưu.")
+        st.subheader("🏆 Radar Toàn Thị Trường & Cảnh Báo Telegram")
+        st.write("Radar sẽ đánh giá cả 10 mã. Mã nào đủ chuẩn Kelly > 0, Bot sẽ tự động gửi báo cáo tóm tắt về điện thoại.")
         
-        if st.button("🚀 Kích hoạt Radar Quét (Chỉ mất khoảng 5-10 giây)"):
+        if st.button("🚀 Quét Toàn Bộ & Báo cáo Bot"):
             progress_bar = st.progress(0)
             radar_results = []
+            alert_stocks = [] # Danh sách gom các mã thỏa điều kiện nhắn tin
             
             for i, sym in enumerate(tickers):
-                # 1. Tải dữ liệu (Lấy từ RAM cực nhanh)
-                df_scan = load_cached_data(sym)
-                if df_scan.empty or len(df_scan) < 50:
-                    continue
-                    
-                df_f = build_features(df_scan)
-                m = AIModel()
-                m.train(df_f)
-                latest = df_f.tail(1)
-                scan_prob = m.predict_prob(latest)[0]
+                res = analyze_symbol(sym, future_days)
+                if not res: continue
                 
-                scan_price = latest['close'].values[0]
-                scan_vwap = latest['price_to_vwap'].values[0]
-                scan_adl = latest['adl_zscore'].values[0]
+                scan_prob = res['prob']
+                scan_preds = res['future_preds_adapt']
                 
-                # 2. Chạy Auto-Regressive tính T+3
-                df_r = df_scan[['close']].copy()
-                for j in range(1, 6): df_r[f'lag_{j}'] = df_r['close'].shift(j)
-                df_r = df_r.dropna()
-                X_a = df_r[[f'lag_{j}' for j in range(5, 0, -1)]]
-                y_a = df_r['close']
-                reg_m = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
-                reg_m.fit(X_a, y_a)
-                
-                scan_preds = []
-                c_lags = df_scan['close'].iloc[-5:].values.tolist()
-                for _ in range(future_days):
-                    p = reg_m.predict(np.array([c_lags]))[0]
-                    scan_preds.append(float(p))
-                    c_lags.pop(0)
-                    c_lags.append(float(p))
-                    
                 min_idx = int(np.argmin(scan_preds))
                 buy_p = scan_preds[min_idx]
                 
                 scan_profit = 0
                 if min_idx + 3 < len(scan_preds):
-                    valid_sell = scan_preds[min_idx + 3:]
-                    sell_p = max(valid_sell)
-                    scan_profit = (sell_p - buy_p) / buy_p * 100
+                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
                     
-                # 3. Tính Kelly
                 scan_kelly = 0
-                if scan_profit > 0:
-                    b_ratio = scan_profit / 5.0
-                    if b_ratio > 0:
-                        k = scan_prob - ((1-scan_prob)/b_ratio)
-                        scan_kelly = max(0, k / 2) * 100
+                if scan_profit > 0 and (scan_profit / 5.0) > 0:
+                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100
                         
                 radar_results.append({
-                    "Mã CP": sym,
-                    "Xác suất Tăng": scan_prob,
-                    "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, # Chuyển thành số thập phân để format
-                    "Kỳ vọng T+3": scan_profit / 100,
-                    "Giá Canh Mua": buy_p,
-                    "Dòng Tiền": "✅ Gom" if scan_adl > 0 else "❌ Xả",
-                    "VWAP": "Tốt" if scan_vwap > 0 else "Xấu"
+                    "Mã CP": sym, "Xác suất Tăng": scan_prob,
+                    "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, "Kỳ vọng T+3": scan_profit / 100,
+                    "Giá Canh Mua": buy_p
                 })
+                
+                # NẾU KELLY > 0 -> Đưa vào danh sách gửi Telegram
+                if scan_kelly > 0:
+                    alert_stocks.append(f"🔹 *{sym}*: Tỷ trọng an toàn {scan_kelly:.1f}% | Canh mua: {buy_p:,.0f}đ | Kỳ vọng: +{scan_profit:.2f}%")
                 
                 progress_bar.progress((i + 1) / len(tickers))
                 
             progress_bar.empty()
             
+            # Xử lý hiện bảng trên Web
             if radar_results:
-                radar_df = pd.DataFrame(radar_results)
-                # Sắp xếp theo Tỷ trọng Vốn giảm dần
-                radar_df = radar_df.sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
+                radar_df = pd.DataFrame(radar_results).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
+                st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
                 
-                # Hiển thị bảng với màu sắc trực quan (Heatmap)
-                st.dataframe(
-                    radar_df.style.format({
-                        "Xác suất Tăng": "{:.1%}",
-                        "Tỷ trọng Vốn (Kelly)": "{:.1%}",
-                        "Kỳ vọng T+3": "{:+.2%}",
-                        "Giá Canh Mua": "{:,.0f} đ"
-                    }).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"),
-                    use_container_width=True,
-                    height=400
-                )
-                
-                # Báo cáo kết luận tổng quan
-                best_stock = radar_df.iloc[0]
-                if best_stock["Tỷ trọng Vốn (Kelly)"] > 0:
-                    st.success(f"🏆 **ĐÁNH GIÁ TỔNG QUAN:** Cổ phiếu đáng mua nhất hiện tại là **{best_stock['Mã CP']}**. \n\nHệ thống AI đánh giá xác suất tăng là **{best_stock['Xác suất Tăng']:.1%}** và đề xuất giải ngân tối đa **{best_stock['Tỷ trọng Vốn (Kelly)']:.1%}** tổng vốn.")
+                # Xử lý gửi Telegram tổng hợp
+                if bot_token and chat_id:
+                    if len(alert_stocks) > 0:
+                        final_msg = "🏆 *BÁO CÁO RADAR AI QUANT* 🏆\n_Hệ thống vừa phát hiện các mã đạt tiêu chuẩn mua:_\n\n"
+                        final_msg += "\n".join(alert_stocks)
+                        send_telegram_alert(bot_token, chat_id, final_msg)
+                        st.toast("Đã gửi báo cáo tổng hợp qua Telegram!", icon="✈️")
+                    else:
+                        st.warning("Đã quét xong. Không có mã nào đủ an toàn để báo cáo Bot.")
                 else:
-                    st.warning("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Toàn thị trường hiện tại đang rất rủi ro. Không có mã nào thỏa mãn tiêu chuẩn Kelly để giải ngân. Thầy nên đứng ngoài quan sát (Cầm tiền mặt).")
-                    
-else:
-    st.error("Không thể kết nối dữ liệu.")
+                    st.info("Quét hoàn tất. Hãy cài đặt Bot ở Sidebar để nhận tin nhắn tự động.")
+else: st.error("Không thể kết nối dữ liệu.")
