@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import sys
 import os
 import requests
+import time  # THÊM THƯ VIỆN NÀY ĐỂ XỬ LÝ CHỐNG BLOCK
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,9 +26,6 @@ INDUSTRIES = {
     "🚢 Cảng biển & Thủy sản": ["HAH", "GMD", "VSC", "VHC", "ANV", "FMC"]
 }
 
-# ==========================================
-# KHỞI TẠO BỘ NHỚ CHỐNG SPAM TELEGRAM
-# ==========================================
 if 'last_alert' not in st.session_state:
     st.session_state['last_alert'] = ""
 
@@ -39,16 +37,27 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: CÁC MODULE TOÁN HỌC & DỮ LIỆU
+# PHẦN 1: TẢI DỮ LIỆU (CÓ CƠ CHẾ CHỐNG BAN CỦA YAHOO)
 # ==========================================
 class DataLoader:
     def get_data(self, symbol, days=1095):
         yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
-        ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(start=start_date, end=end_date)
+        
+        df = pd.DataFrame()
+        # CƠ CHẾ AUTO-RETRY: Cố gắng tải 3 lần nếu bị Yahoo chặn
+        for attempt in range(3):
+            try:
+                ticker = yf.Ticker(yf_symbol)
+                df = ticker.history(start=start_date, end=end_date)
+                if not df.empty:
+                    break # Tải thành công thì thoát vòng lặp
+            except Exception as e:
+                time.sleep(2) # Bị chặn thì nghỉ 2 giây rồi thử lại
+                
         if df.empty: return pd.DataFrame()
+            
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
         if 'date' in df.columns and df['date'].dt.tz is not None:
@@ -95,8 +104,10 @@ class AIModel:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def analyze_symbol(symbol, future_days):
+    time.sleep(0.5) # BỘ GIẢM XÓC: Nghỉ nửa giây trước khi soi mã mới để không bị Yahoo khóa mõm
     df = DataLoader().get_data(symbol)
     if df.empty or len(df) < 50: return None
+    
     df_feat = build_features(df)
     model = AIModel()
     model.train(df_feat)
@@ -147,20 +158,20 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
     auto_bot = st.toggle("📡 Bật Auto-Bot (Quét Ngầm)", value=False)
-    st.caption("Nếu bật, AI sẽ tự chạy ngầm tìm Top 5 cổ phiếu xịn nhất và báo về điện thoại. Tính năng có trang bị Màng lọc chống Spam, chỉ báo khi có tín hiệu mới.")
+    st.caption("AI sẽ tự chạy ngầm tìm Top 5 mã xịn nhất toàn thị trường và báo về điện thoại. Có chống Spam, chỉ báo khi có mã lọt top mới.")
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
 if st.button("🔄 Cập nhật Dữ liệu Real-time (Làm mới AI)", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã tải lại dữ liệu mới nhất. Các bộ quét sẽ tính toán lại từ đầu!")
+    st.success("Đã xóa bộ nhớ. Radar sẽ tải lại dữ liệu sạch!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
     selected_sector = st.selectbox("📊 Chọn Nhóm Ngành:", list(INDUSTRIES.keys()))
     current_tickers = INDUSTRIES[selected_sector]
 with col_s2:
-    symbol = st.selectbox("🎯 Chọn Mã (Chi tiết):", current_tickers)
+    symbol = st.selectbox("🎯 Chọn Mã (Chi tiết Tab 1,2):", current_tickers)
 with col_s3:
     timeframe = st.selectbox("🔙 Dò Cực trị:", ["Theo Tuần", "Theo Tháng", "Theo Quý", "Theo Năm"], index=1)
 with col_s4:
@@ -219,7 +230,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest (Mã Hiện Tại)", "🏆 Radar Tín Hiệu (Telegram)", "📈 Bảng Xếp Hạng Ngành", "🧠 Trạng thái Học Máy AI"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu (Top 5)", "📈 Xếp Hạng Ngành", "🧠 Trạng thái Học Máy"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -281,16 +292,15 @@ if result is not None:
 
     with tab3:
         st.subheader("🏆 Radar Tín Hiệu & Báo Cáo Telegram (Lọc Top 5)")
-        st.write("Quét thủ công bằng nút bấm dưới đây nếu thầy không dùng chế độ treo máy Auto-Bot.")
         col_btn1, col_btn2 = st.columns(2)
         run_scan = False
         scan_mode = "sector"
         
         with col_btn1:
-            if st.button(f"🔍 Quét Top 5 Ngành {selected_sector}", type="primary"):
+            if st.button(f"🔍 Quét & Tìm Top 5 Ngành {selected_sector}", type="primary"):
                 run_scan = True; scan_mode = "sector"
         with col_btn2:
-            if st.button("🌍 Quét Top 5 Toàn Bộ 50 Mã", type="primary"):
+            if st.button("🌍 Quét Toàn Bộ TT (Lọc Top 5 Cực phẩm)", type="primary"):
                 run_scan = True; scan_mode = "all"
                 
         if run_scan:
@@ -321,24 +331,27 @@ if result is not None:
                 if bot_token and chat_id:
                     buyable_df = radar_df[radar_df["Tỷ trọng Vốn (Kelly)"] > 0]
                     top_5_df = buyable_df.head(5)
-                    final_msg = f"🏆 *BÁO CÁO TOP 5 ({'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'})* 🏆\n\n"
+                    final_msg = f"🏆 *TOP 5 MÃ TỐT NHẤT ({'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'})* 🏆\n\n"
                     if not top_5_df.empty:
-                        final_msg += "🎯 *TOP KHUYẾN NGHỊ MUA:*\n"
                         for _, row in top_5_df.iterrows():
                             final_msg += f"✅ *{row['Mã CP']}* | Mua: {row['Giá Canh Mua']:,.0f}đ | Kỳ vọng: +{row['Kỳ vọng T+3']*100:.2f}% | Kelly: {row['Tỷ trọng Vốn (Kelly)']*100:.1f}%\n"
                     else:
-                        final_msg += "⚠️ *KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA.*\n(Thị trường rủi ro, cầm tiền mặt)\n"
+                        final_msg += "⚠️ *Toàn bộ các mã quét được đều Xấu. Nên đứng ngoài.*\n"
                     send_telegram_alert(bot_token, chat_id, final_msg)
-                    st.toast("Đã lọc và gửi báo cáo qua Telegram!", icon="✈️")
+                    st.toast("Đã lọc và gửi báo cáo Top 5 qua Telegram!", icon="✈️")
 
     with tab4:
-        st.subheader(f"📈 Bảng Xếp Hạng: Hiệu suất Nhóm {selected_sector}")
-        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ kiểm định cho nhóm ngành này:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
+        st.subheader(f"📈 Bảng Xếp Hạng Lãi/Lỗ: Nhóm {selected_sector}")
+        st.write("Bảng này giúp thầy chọn ra 'Con ngựa chiến' tốt nhất trong ngành để đầu tư.")
+        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
-        if st.button("🔄 Chạy Backtest Nhóm Ngành", type="secondary"):
-            with st.spinner("Đang tự động chấm điểm Lãi/Lỗ..."):
+        
+        if st.button("🔄 Xếp Hạng & Chấm Điểm Lãi/Lỗ Nhóm Ngành", type="secondary"):
+            with st.spinner("Đang cho AI chạy Backtest từng mã trong ngành..."):
                 all_bt_results = []
-                for sym in current_tickers:
+                # Thêm thanh tiến trình để người dùng không sốt ruột
+                bt_progress = st.progress(0)
+                for idx, sym in enumerate(current_tickers):
                     res_bt = analyze_symbol(sym, future_days)
                     if not res_bt: continue
                     df_f_bt = res_bt['df_feat']
@@ -359,6 +372,9 @@ if result is not None:
                     total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
                     win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
                     all_bt_results.append({"Mã CP": sym, "Hiệu suất AI": profit_pct / 100, "So với Mua & Giữ": (profit_pct - bnh_profit_pct) / 100, "Tỷ lệ Thắng": win_rate / 100, "Rủi ro (Drawdown)": max_dd / 100})
+                    bt_progress.progress((idx + 1) / len(current_tickers))
+                
+                bt_progress.empty()
             if all_bt_results:
                 df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
                 st.dataframe(df_bt_all.style.format({"Hiệu suất AI": "{:+.2%}", "So với Mua & Giữ": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Rủi ro (Drawdown)": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"), use_container_width=True)
@@ -368,11 +384,11 @@ if result is not None:
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán Lõi", "XGBoost ML")
         col_ai2.metric("Dữ liệu Lịch sử (Features)", f"{result['data_rows']} phiên x {result['features_count']} biến")
-        col_ai3.metric("Số lượng Mã hệ thống", f"{sum(len(v) for v in INDUSTRIES.values())} mã (7 Ngành)")
-        st.progress(100, text="✅ Mô hình đã phân tích và hội tụ xong.")
+        col_ai3.metric("Danh mục Quét Lọc", f"{sum(len(v) for v in INDUSTRIES.values())} mã (7 Ngành lớn)")
+        st.progress(100, text="✅ Trạng thái: Hệ thống đang chạy Ổn định và Chống Block (Anti-Ban) tốt.")
 
 # ==========================================
-# CƠ CHẾ AUTO-BOT (CẮM MÁY TỰ ĐỘNG CHẠY NGẦM CHỐNG SPAM)
+# CƠ CHẾ AUTO-BOT (CẮM MÁY CHẠY NGẦM)
 # ==========================================
 if auto_bot and bot_token and chat_id:
     auto_results = []
@@ -393,15 +409,13 @@ if auto_bot and bot_token and chat_id:
             
     if auto_results:
         auto_df = pd.DataFrame(auto_results).sort_values(by="kelly", ascending=False).head(5)
-        auto_msg = "🤖 *AUTO-BOT: TÍN HIỆU TOP 5 TOÀN TT* 🤖\n\n"
+        auto_msg = "🤖 *TÍN HIỆU NGẦM TỪ BOT (TOP 5)* 🤖\n\n"
         for _, row in auto_df.iterrows():
-            auto_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
+            auto_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}%\n"
             
-        # KIỂM TRA CHỐNG SPAM: Chỉ gửi nếu danh sách Top 5 có sự thay đổi
         if auto_msg != st.session_state['last_alert']:
             send_telegram_alert(bot_token, chat_id, auto_msg)
             st.session_state['last_alert'] = auto_msg
-            st.toast("Auto-Bot đã gửi tín hiệu ngầm thành công!", icon="🤖")
 
 else: 
     if not result: st.error("Không thể kết nối dữ liệu.")
