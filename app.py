@@ -148,7 +148,7 @@ with st.sidebar:
                 st.error("Gửi thất bại. Hãy kiểm tra lại Token hoặc gõ /start với bot.")
     st.markdown("---")
     
-st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
+st.title(" Hệ thống Dự báo AI Quant")
 
 if st.button("🔄 Cập nhật Dữ liệu Real-time (Xóa bộ nhớ đệm)", use_container_width=True):
     st.cache_data.clear()
