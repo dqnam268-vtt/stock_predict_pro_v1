@@ -155,7 +155,7 @@ with st.sidebar:
             else: st.error("Gửi thất bại.")
     st.markdown("---")
     
-st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
+st.title("📈 Hệ thống dự báo AI Quant")
 
 if st.button("🔄 Cập nhật Dữ liệu Real-time (Làm mới AI)", use_container_width=True):
     st.cache_data.clear()
