@@ -127,20 +127,25 @@ st.set_page_config(page_title="AI Quant - Cảnh Báo", layout="wide")
 
 with st.sidebar:
     st.header("🤖 Cài đặt Telegram Bot")
-    st.write("Nhập thông tin để nhận cảnh báo tự động:")
-    bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
-    chat_id = st.text_input("💬 Chat ID của bạn:")
     
+    # Gọi dữ liệu tự động từ bộ nhớ khóa bảo mật của Streamlit
+    try:
+        bot_token = st.secrets["TELEGRAM_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        st.success("✅ Đã tải cấu hình Bot bảo mật thành công!")
+    except:
+        bot_token = ""
+        chat_id = ""
+        st.error("⚠️ Chưa tìm thấy khóa bảo mật (Secrets).")
+
     if st.button("🔔 Gửi tin nhắn Test", use_container_width=True):
         if bot_token and chat_id:
             test_msg = "✅ *Tuyệt vời!*\nHệ thống AI Quant đã kết nối thành công. Bot đang sẵn sàng săn mồi!"
             success = send_telegram_alert(bot_token, chat_id, test_msg)
             if success:
-                st.success("Đã gửi tin nhắn test! Thầy kiểm tra điện thoại nhé.")
+                st.success("Đã gửi tin nhắn test! Bạn kiểm tra điện thoại nhé.")
             else:
                 st.error("Gửi thất bại. Hãy kiểm tra lại Token hoặc gõ /start với bot.")
-        else:
-            st.warning("Vui lòng nhập đủ Token và Chat ID.")
     st.markdown("---")
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
