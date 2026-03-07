@@ -5,7 +5,7 @@ from xgboost import XGBClassifier
 def build_features(df):
     df = df.copy()
     
-    # --- 1. CÁC CHỈ BÁO NỀN TẢNG (Đã có) ---
+    # --- 1. CÁC CHỈ BÁO NỀN TẢNG ---
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=21).std() * np.sqrt(252)
     
@@ -47,17 +47,13 @@ def build_features(df):
     df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
     df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
 
-    # ========================================================
-    # TRỤ CỘT 1: DẠY AI CÁC GIÁC QUAN MỚI (NEW FEATURES)
-    # ========================================================
-    
-    # --- 2. Bollinger Bands (Đo độ nén giá sắp bùng nổ) ---
+    # --- 2. BOLLINGER BANDS (Đo độ nén giá) ---
     df['bb_upper'] = ma20 + (std20 * 2)
     df['bb_lower'] = ma20 - (std20 * 2)
-    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / ma20  # Băng thông co thắt
-    df['bb_pct_b'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-9) # Vị trí giá
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / ma20  
+    df['bb_pct_b'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-9) 
 
-    # --- 3. ATR (Average True Range - Đo biên độ dao động thật) ---
+    # --- 3. ATR (Biên độ dao động thật) ---
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -66,12 +62,12 @@ def build_features(df):
     df['atr_14'] = true_range.rolling(14).mean()
     df['atr_ratio'] = df['atr_14'] / df['close']
 
-    # --- 4. Dấu chân cá mập (CMF - Chaikin Money Flow) ---
+    # --- 4. CHAIKIN MONEY FLOW (Dấu chân dòng tiền) ---
     money_flow_mult = ((df['close'] - df['low']) - (df['high'] - df['close'])) / high_low_diff
     money_flow_vol = money_flow_mult * df['volume']
     df['cmf_20'] = money_flow_vol.rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-9)
 
-    # --- 5. Tính chu kỳ thời gian (Seasonality) ---
+    # --- 5. SEASONALITY (Tính chu kỳ) ---
     if 'date' in df.columns:
         df['month'] = df['date'].dt.month
         df['day_of_week'] = df['date'].dt.dayofweek
@@ -83,7 +79,6 @@ def build_features(df):
 
 class AIModel:
     def __init__(self):
-        # Bộ não XGBoost nâng cấp
         self.model = XGBClassifier(
             n_estimators=300, 
             max_depth=6, 
@@ -93,7 +88,6 @@ class AIModel:
             objective='binary:logistic', 
             random_state=42
         )
-        # Khai báo cho AI biết nó phải học 16 môn phái này
         self.features = [
             'returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 
             'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14',

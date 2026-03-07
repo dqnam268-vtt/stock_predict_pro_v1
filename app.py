@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from xgboost import XGBRegressor, XGBClassifier
+from xgboost import XGBRegressor # Chỉ còn giữ lại Regressor cho phần dự báo nến tương lai
 import yfinance as yf
 from datetime import datetime, timedelta
 import sys
@@ -12,6 +12,9 @@ import requests
 import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+# NHÚNG MODULE "BỘ NÃO AI" TỪ FILE ai_core.py VÀO ĐÂY
+from ai_core import build_features, AIModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -40,7 +43,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (CHỐNG TREO STREAMLIT)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (CHỐNG TREO STREAMLIT & ĐỌC EXCEL)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -80,7 +83,6 @@ class CloudDataLoader:
         worksheet = None
         df = pd.DataFrame()
 
-        # BƯỚC 1: ĐỌC DỮ LIỆU
         try:
             worksheet = self.db.worksheet(symbol)
             data = worksheet.get_all_records()
@@ -91,14 +93,12 @@ class CloudDataLoader:
                 time.sleep(1)
                 worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
             except:
-                # Tránh treo app, nếu lỗi tạo thì trả về Yahoo luôn
                 return self.download_yf(yf_symbol, start_date, end_date)
         except Exception as e:
             return self.download_yf(yf_symbol, start_date, end_date)
 
         if worksheet is None: return self.download_yf(yf_symbol, start_date, end_date)
 
-        # BƯỚC 2: GHI DỮ LIỆU
         if df.empty:
             df = self.download_yf(yf_symbol, start_date, end_date)
             if not df.empty:
@@ -124,68 +124,12 @@ class CloudDataLoader:
                     except: pass
         return df
 
-def build_features(df):
-    df = df.copy()
-    df['returns'] = np.log(df['close'] / df['close'].shift(1))
-    df['volatility'] = df['returns'].rolling(window=21).std() * np.sqrt(252)
-    
-    ma20 = df['close'].rolling(window=20).mean()
-    std20 = df['close'].rolling(window=20).std()
-    df['z_score'] = (df['close'] - ma20) / std20
-    
-    ma50 = df['close'].rolling(window=50).mean()
-    df['price_to_ma50'] = (df['close'] - ma50) / ma50
-    ma200 = df['close'].rolling(window=200).mean()
-    df['price_to_ma200'] = (df['close'] - ma200) / ma200
-    
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / (loss + 1e-9) 
-    df['rsi_14'] = 100 - (100 / (1 + rs))
-
-    ema12 = df['close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['close'].ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = macd_line - macd_signal
-    
-    def get_hurst(ts):
-        lags = range(2, 20)
-        tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
-        return np.polyfit(np.log(lags), np.log(tau), 1)[0] * 2.0
-    df['hurst'] = df['close'].rolling(window=100).apply(get_hurst, raw=True)
-    
-    high_low_diff = df['high'] - df['low']
-    high_low_diff = high_low_diff.replace(0, 0.001) 
-    mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / high_low_diff
-    df['adl'] = (mfm * df['volume']).cumsum()
-    df['adl_zscore'] = (df['adl'] - df['adl'].rolling(20).mean()) / df['adl'].rolling(20).std()
-    
-    tp_v = ((df['high'] + df['low'] + df['close']) / 3) * df['volume']
-    df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
-    df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
-    
-    return df.dropna()
-
-class AIModel:
-    def __init__(self):
-        self.model = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
-        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14']
-    
-    def train(self, df):
-        df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
-        df = df.dropna()
-        self.model.fit(df[self.features], df['target'])
-        
-    def predict_prob(self, df):
-        return self.model.predict_proba(df[self.features])[:, 1]
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
     df = CloudDataLoader().get_data(symbol)
     if df is None or df.empty or len(df) < 50: return None
     
+    # GỌI BỘ NÃO TỪ AI_CORE
     df_feat = build_features(df)
     model = AIModel()
     model.train(df_feat)
@@ -240,9 +184,9 @@ with st.sidebar:
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu", use_container_width=True):
+if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới!")
+    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới để AI nạp lại bộ dữ liệu Vĩ mô!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -308,7 +252,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 CÔNG CỤ XÂY KHO"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 CÔNG CỤ XÂY KHO & TÌNH TRẠNG AI"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -550,8 +494,8 @@ if result is not None:
                 try:
                     loader.get_data(sym_build, 3650)
                 except Exception as e: 
-                    pass # Ém lỗi đi để nó không chết máy
-                time.sleep(2.5) # BÍ QUYẾT: Nghỉ 2.5s để luồn lách qua khe cửa an ninh Google
+                    pass 
+                time.sleep(2.5) 
                 prog_bar.progress((idx + 1) / len(all_tickers_list))
                 
             status_text.success("✅ XÂY KHO HOÀN TẤT 100%! Toàn bộ 50 mã đã có mặt trên Google Sheet. Từ giờ App sẽ chạy với tốc độ ánh sáng!")
