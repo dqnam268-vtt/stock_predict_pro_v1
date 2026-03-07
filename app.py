@@ -40,7 +40,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (NÂNG CẤP LƯU TRỮ 10 NĂM LỊCH SỬ)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ HỆ THỐNG XUYÊN THỦNG QUOTA)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -70,38 +70,62 @@ class CloudDataLoader:
             df['date'] = df['date'].dt.tz_localize(None)
         return df
 
-    def get_data(self, symbol, days=3650): # NÂNG CẤP: Yêu cầu 3650 ngày (10 năm)
+    def get_data(self, symbol, days=3650):
         yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
         if self.db is None: return self.download_yf(yf_symbol, start_date, end_date)
 
+        worksheet = None
+        df = pd.DataFrame()
+
+        # --- BƯỚC 1: ĐỌC HOẶC TẠO TAB (CÓ CHỐNG CHẶN 60s) ---
         try:
             worksheet = self.db.worksheet(symbol)
             data = worksheet.get_all_records()
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
         except gspread.exceptions.WorksheetNotFound:
-            time.sleep(1.5)
-            # NÂNG CẤP: Tạo file Sheet chứa được 4000 dòng để chứa đủ 10 năm nến
-            worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
-            df = pd.DataFrame()
+            time.sleep(2)
+            try:
+                worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
+            except Exception as e:
+                if "429" in str(e) or "Quota" in str(e):
+                    st.toast(f"⏳ Cổng an ninh Google đang chặn mã {symbol}. Đang chờ 60 giây để mở khóa...")
+                    time.sleep(60) # Chờ 1 phút cho Google hạ hỏa
+                    worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
         except Exception as e:
+            if "429" in str(e) or "Quota" in str(e):
+                st.toast(f"⏳ Cổng an ninh Google đang chặn đọc mã {symbol}. Đang chờ 60 giây...")
+                time.sleep(60)
+                worksheet = self.db.worksheet(symbol)
+                data = worksheet.get_all_records()
+                df = pd.DataFrame(data)
+                if not df.empty: df['date'] = pd.to_datetime(df['date'])
+
+        # Nếu xui quá vẫn lỗi thì mới dùng Yahoo
+        if worksheet is None:
             return self.download_yf(yf_symbol, start_date, end_date)
 
-        # NÂNG CẤP THÔNG MINH: Nếu dữ liệu cũ đang ít hơn 2000 phiên (< 8 năm), ép bot phải XÓA và kéo lại 10 năm
+        # --- BƯỚC 2: GHI 10 NĂM DỮ LIỆU VÀO KHO (CÓ CHỐNG CHẶN 60s) ---
         if df.empty or len(df) < 2000:
             df = self.download_yf(yf_symbol, start_date, end_date)
             if not df.empty:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                 try:
-                    time.sleep(1.5)
+                    time.sleep(2)
                     worksheet.clear()
                     worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
-                except: pass
+                except Exception as e:
+                    if "429" in str(e) or "Quota" in str(e):
+                        st.toast(f"⏳ Tạm dừng 60 giây để đẩy 10 năm dữ liệu {symbol} vào kho Google...")
+                        time.sleep(60)
+                        worksheet.clear()
+                        worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
         else:
+            # Cập nhật dữ liệu hàng ngày (Delta)
             last_date = df['date'].max()
             if end_date.date() > last_date.date() and end_date.weekday() < 5:
                 new_start = last_date + timedelta(days=1)
@@ -113,7 +137,10 @@ class CloudDataLoader:
                         time.sleep(1)
                         worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
-                    except: pass
+                    except Exception as e:
+                        if "429" in str(e) or "Quota" in str(e):
+                            time.sleep(60)
+                            worksheet.append_rows(df_save.values.tolist())
         return df
 
 def build_features(df):
@@ -125,7 +152,6 @@ def build_features(df):
     std20 = df['close'].rolling(window=20).std()
     df['z_score'] = (df['close'] - ma20) / std20
     
-    # NÂNG CẤP CHỈ BÁO VĨ MÔ CHO 10 NĂM DỮ LIỆU
     ma50 = df['close'].rolling(window=50).mean()
     df['price_to_ma50'] = (df['close'] - ma50) / ma50
     ma200 = df['close'].rolling(window=200).mean()
@@ -134,7 +160,7 @@ def build_features(df):
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / (loss + 1e-9) # Tránh chia cho 0
+    rs = gain / (loss + 1e-9) 
     df['rsi_14'] = 100 - (100 / (1 + rs))
 
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -163,7 +189,6 @@ def build_features(df):
 
 class AIModel:
     def __init__(self):
-        # NÂNG CẤP BỘ NÃO AI: Học sâu hơn, nhiều bộ lọc hơn để bao quát 10 năm
         self.model = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
         self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14']
     
@@ -233,11 +258,11 @@ with st.sidebar:
     auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
     st.caption("AI tự chạy ngầm. Sẽ gửi Báo cáo Đầu Phiên (9h15) và Đóng Phiên (15h05) bao gồm toàn thị trường.")
     
-st.title("📈 Hệ thống dự báo AI Quant")
+st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Luyện AI & Cập nhật Dữ liệu Mới nhất", use_container_width=True):
+if st.button("🔄 Luyện AI & Xóa Nhớ Đệm", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ. AI sẽ tiến hành nạp dữ liệu và huấn luyện lại từ đầu!")
+    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -261,7 +286,6 @@ if "Tuần" in future_horizon: future_days = 5
 elif "3 Tháng" in future_horizon: future_days = 63
 else: future_days = 21
 
-# Bổ sung các tùy chọn Backtest dài hạn
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
 with st.spinner(f"Đang phân tích 10 năm dữ liệu mã {symbol}..."):
@@ -343,11 +367,9 @@ if result is not None:
 
     with tab2:
         st.subheader(f"Mô phỏng Giao dịch Thực tế theo AI - Mã {symbol}")
-        # Bổ sung "Toàn bộ lịch sử (10 Năm)" vào Dropdown
         bt_timeframe_single = st.selectbox("⏳ Chọn chu kỳ kiểm tra:", list(bt_days_dict.keys()), index=1, key="bt_single")
         bt_days_single = bt_days_dict[bt_timeframe_single]
         
-        # Đảm bảo không cắt quá số dòng hiện có
         bt_days_actual_single = min(bt_days_single, len(df_feat))
         bt_df_current = df_feat.tail(bt_days_actual_single).copy()
         bt_df_current['prob'] = all_probs[-bt_days_actual_single:]
@@ -419,9 +441,6 @@ if result is not None:
                     send_telegram_alert(bot_token, chat_id, final_msg)
                     st.toast("Đã lọc và gửi báo cáo Top 5 qua Telegram!", icon="✈️")
 
-    # ==========================================
-    # TAB 4: BẢNG XẾP HẠNG NGÀNH + ĐÁNH GIÁ CỨNG TOP 10
-    # ==========================================
     with tab4:
         st.subheader(f"📈 Bảng Xếp Hạng Lãi/Lỗ: Nhóm {selected_sector}")
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
