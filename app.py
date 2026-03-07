@@ -40,7 +40,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD & AI MODEL
+# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ X-QUANG TÌM LỖI)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -53,7 +53,7 @@ class CloudDataLoader:
             self.client = gspread.authorize(creds)
             self.db = self.client.open_by_key(self.sheet_id)
         except Exception as e:
-            st.warning("⚠️ Lỗi kết nối Google Sheet. Đang dùng dữ liệu từ Yahoo.")
+            st.error(f"🚨 LỖI KẾT NỐI API HOẶC SECRETS: {str(e)}") # Báo đỏ nếu sai Secrets
 
     def download_yf(self, yf_symbol, start, end):
         df = pd.DataFrame()
@@ -62,7 +62,7 @@ class CloudDataLoader:
                 ticker = yf.Ticker(yf_symbol)
                 df = ticker.history(start=start, end=end)
                 if not df.empty: break
-            except: time.sleep(1)
+            except: time.sleep(2) # Nghỉ 2 giây chống Rate Limit
         if df.empty: return pd.DataFrame()
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
@@ -86,6 +86,7 @@ class CloudDataLoader:
             worksheet = self.db.add_worksheet(title=symbol, rows="1000", cols="6")
             df = pd.DataFrame()
         except Exception as e:
+            st.error(f"🚨 LỖI TRUY CẬP SHEET {symbol}: {str(e)}") # Báo lỗi nếu File Google Sheet chưa share quyền
             return self.download_yf(yf_symbol, start_date, end_date)
 
         if df.empty:
@@ -391,14 +392,12 @@ if result is not None:
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
-        # HAI NÚT BẤM SANG TRỌNG ĐƯỢC CHIA CỘT
         col_btn_t4_1, col_btn_t4_2 = st.columns(2)
         with col_btn_t4_1:
             btn_rank_sector = st.button("🔄 Xếp Hạng Lãi/Lỗ Nhóm Ngành", type="secondary")
         with col_btn_t4_2:
             btn_top10_all = st.button("🏆 Đánh Giá Cứng Top 10 Toàn TT (Gửi Bot)", type="primary")
 
-        # Logic khi bấm nút quét Nhóm Ngành
         if btn_rank_sector:
             with st.spinner("Đang chạy Backtest từng mã trong ngành..."):
                 all_bt_results = []
@@ -430,7 +429,6 @@ if result is not None:
                 df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
                 st.dataframe(df_bt_all.style.format({"Hiệu suất AI": "{:+.2%}", "So với Mua & Giữ": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Rủi ro (Drawdown)": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"), use_container_width=True)
 
-        # Logic khi bấm nút Đánh Giá Cứng Top 10
         if btn_top10_all:
             with st.spinner("Đang cày xới 50 mã để tìm ra 10 'Con ngựa chiến' xuất sắc nhất lịch sử..."):
                 all_top10_results = []
@@ -441,7 +439,6 @@ if result is not None:
                     res_bt = analyze_symbol(sym, future_days)
                     if not res_bt: continue
                     
-                    # 1. Tính toán Năng lực Lịch sử (Hiệu suất Backtest)
                     df_f_bt = res_bt['df_feat']
                     bt_days_actual = min(bt_days_all, len(df_f_bt))
                     bt_df = df_f_bt.tail(bt_days_actual).copy()
@@ -455,7 +452,6 @@ if result is not None:
                     total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
                     win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
                     
-                    # 2. Tính toán Tín hiệu Mua hiện tại
                     scan_prob = res_bt['prob']
                     scan_preds = res_bt['future_preds_adapt']
                     min_idx = int(np.argmin(scan_preds))
@@ -474,7 +470,6 @@ if result is not None:
                 
                 bt_progress.empty()
                 
-                # 3. Lọc Top 10 và Gửi Telegram
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Hiệu suất AI", ascending=False).head(10).reset_index(drop=True)
                     st.success("Đã tìm ra Bảng Phong Thần Top 10 Toàn Thị Trường!")
