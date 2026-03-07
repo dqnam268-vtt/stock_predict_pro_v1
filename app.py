@@ -40,7 +40,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ X-QUANG TÌM LỖI)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (NÂNG CẤP LƯU TRỮ 10 NĂM LỊCH SỬ)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -53,16 +53,16 @@ class CloudDataLoader:
             self.client = gspread.authorize(creds)
             self.db = self.client.open_by_key(self.sheet_id)
         except Exception as e:
-            st.error(f"🚨 LỖI KẾT NỐI API HOẶC SECRETS: {str(e)}") # Báo đỏ nếu sai Secrets
+            st.error(f"🚨 LỖI API GOOGLE: {str(e)}")
 
     def download_yf(self, yf_symbol, start, end):
         df = pd.DataFrame()
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 ticker = yf.Ticker(yf_symbol)
                 df = ticker.history(start=start, end=end)
                 if not df.empty: break
-            except: time.sleep(2) # Nghỉ 2 giây chống Rate Limit
+            except: time.sleep(3)
         if df.empty: return pd.DataFrame()
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
@@ -70,7 +70,7 @@ class CloudDataLoader:
             df['date'] = df['date'].dt.tz_localize(None)
         return df
 
-    def get_data(self, symbol, days=1095):
+    def get_data(self, symbol, days=3650): # NÂNG CẤP: Yêu cầu 3650 ngày (10 năm)
         yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
@@ -83,19 +83,24 @@ class CloudDataLoader:
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = self.db.add_worksheet(title=symbol, rows="1000", cols="6")
+            time.sleep(1.5)
+            # NÂNG CẤP: Tạo file Sheet chứa được 4000 dòng để chứa đủ 10 năm nến
+            worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
             df = pd.DataFrame()
         except Exception as e:
-            st.error(f"🚨 LỖI TRUY CẬP SHEET {symbol}: {str(e)}") # Báo lỗi nếu File Google Sheet chưa share quyền
             return self.download_yf(yf_symbol, start_date, end_date)
 
-        if df.empty:
+        # NÂNG CẤP THÔNG MINH: Nếu dữ liệu cũ đang ít hơn 2000 phiên (< 8 năm), ép bot phải XÓA và kéo lại 10 năm
+        if df.empty or len(df) < 2000:
             df = self.download_yf(yf_symbol, start_date, end_date)
             if not df.empty:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
-                worksheet.clear()
-                worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
+                try:
+                    time.sleep(1.5)
+                    worksheet.clear()
+                    worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
+                except: pass
         else:
             last_date = df['date'].max()
             if end_date.date() > last_date.date() and end_date.weekday() < 5:
@@ -104,45 +109,69 @@ class CloudDataLoader:
                 if not new_df.empty:
                     df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                     df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
-                    worksheet.append_rows(df_save.values.tolist())
-                    df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
+                    try:
+                        time.sleep(1)
+                        worksheet.append_rows(df_save.values.tolist())
+                        df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
+                    except: pass
         return df
 
 def build_features(df):
     df = df.copy()
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=21).std() * np.sqrt(252)
+    
     ma20 = df['close'].rolling(window=20).mean()
     std20 = df['close'].rolling(window=20).std()
     df['z_score'] = (df['close'] - ma20) / std20
+    
+    # NÂNG CẤP CHỈ BÁO VĨ MÔ CHO 10 NĂM DỮ LIỆU
+    ma50 = df['close'].rolling(window=50).mean()
+    df['price_to_ma50'] = (df['close'] - ma50) / ma50
+    ma200 = df['close'].rolling(window=200).mean()
+    df['price_to_ma200'] = (df['close'] - ma200) / ma200
+    
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-9) # Tránh chia cho 0
+    df['rsi_14'] = 100 - (100 / (1 + rs))
+
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     df['macd_hist'] = macd_line - macd_signal
+    
     def get_hurst(ts):
         lags = range(2, 20)
         tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
         return np.polyfit(np.log(lags), np.log(tau), 1)[0] * 2.0
     df['hurst'] = df['close'].rolling(window=100).apply(get_hurst, raw=True)
+    
     high_low_diff = df['high'] - df['low']
     high_low_diff = high_low_diff.replace(0, 0.001) 
     mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / high_low_diff
     df['adl'] = (mfm * df['volume']).cumsum()
     df['adl_zscore'] = (df['adl'] - df['adl'].rolling(20).mean()) / df['adl'].rolling(20).std()
+    
     tp_v = ((df['high'] + df['low'] + df['close']) / 3) * df['volume']
     df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
     df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
+    
     return df.dropna()
 
 class AIModel:
     def __init__(self):
-        self.model = XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
-        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap']
+        # NÂNG CẤP BỘ NÃO AI: Học sâu hơn, nhiều bộ lọc hơn để bao quát 10 năm
+        self.model = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, objective='binary:logistic', random_state=42)
+        self.features = ['returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14']
+    
     def train(self, df):
         df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
         df = df.dropna()
         self.model.fit(df[self.features], df['target'])
+        
     def predict_prob(self, df):
         return self.model.predict_proba(df[self.features])[:, 1]
 
@@ -150,7 +179,7 @@ class AIModel:
 def analyze_symbol(symbol, future_days):
     time.sleep(0.5) 
     df = CloudDataLoader().get_data(symbol)
-    if df.empty or len(df) < 50: return None
+    if df is None or df.empty or len(df) < 50: return None
     
     df_feat = build_features(df)
     model = AIModel()
@@ -165,7 +194,7 @@ def analyze_symbol(symbol, future_days):
     
     X_adapt = df_reg[features_reg]
     y_adapt = df_reg['close']
-    reg_model_adapt = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=99)
+    reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
     future_preds_adapt = []
@@ -204,11 +233,11 @@ with st.sidebar:
     auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
     st.caption("AI tự chạy ngầm. Sẽ gửi Báo cáo Đầu Phiên (9h15) và Đóng Phiên (15h05) bao gồm toàn thị trường.")
     
-st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
+st.title("📈 Hệ thống dự báo AI Quant")
 
-if st.button("🔄 Cập nhật Dữ liệu Real-time", use_container_width=True):
+if st.button("🔄 Luyện AI & Cập nhật Dữ liệu Mới nhất", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã làm mới bộ nhớ. Dữ liệu mới nhất đã sẵn sàng!")
+    st.success("Đã xóa bộ nhớ. AI sẽ tiến hành nạp dữ liệu và huấn luyện lại từ đầu!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -232,9 +261,10 @@ if "Tuần" in future_horizon: future_days = 5
 elif "3 Tháng" in future_horizon: future_days = 63
 else: future_days = 21
 
-bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "Toàn bộ lịch sử": 750}
+# Bổ sung các tùy chọn Backtest dài hạn
+bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
-with st.spinner(f"Đang kết nối kho dữ liệu lấy mã {symbol}..."):
+with st.spinner(f"Đang phân tích 10 năm dữ liệu mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -274,7 +304,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu (Top 5)", "📈 Xếp Hạng Ngành", "🧠 Trạng thái Hệ thống"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu (Top 5)", "📈 Xếp Hạng Ngành", "🧠 Trạng thái AI"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -313,10 +343,15 @@ if result is not None:
 
     with tab2:
         st.subheader(f"Mô phỏng Giao dịch Thực tế theo AI - Mã {symbol}")
-        bt_timeframe_single = st.selectbox("⏳ Chọn chu kỳ kiểm tra:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_single")
+        # Bổ sung "Toàn bộ lịch sử (10 Năm)" vào Dropdown
+        bt_timeframe_single = st.selectbox("⏳ Chọn chu kỳ kiểm tra:", list(bt_days_dict.keys()), index=1, key="bt_single")
         bt_days_single = bt_days_dict[bt_timeframe_single]
-        bt_df_current = df_feat.tail(bt_days_single).copy()
-        bt_df_current['prob'] = all_probs[-len(bt_df_current):]
+        
+        # Đảm bảo không cắt quá số dòng hiện có
+        bt_days_actual_single = min(bt_days_single, len(df_feat))
+        bt_df_current = df_feat.tail(bt_days_actual_single).copy()
+        bt_df_current['prob'] = all_probs[-bt_days_actual_single:]
+        
         bt_df_current['signal'] = np.where(bt_df_current['prob'] > 0.55, 1, 0)
         bt_df_current['daily_return'] = bt_df_current['returns']
         bt_df_current['strategy_return'] = bt_df_current['signal'].shift(1) * bt_df_current['daily_return']
@@ -389,7 +424,7 @@ if result is not None:
     # ==========================================
     with tab4:
         st.subheader(f"📈 Bảng Xếp Hạng Lãi/Lỗ: Nhóm {selected_sector}")
-        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
+        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
         col_btn_t4_1, col_btn_t4_2 = st.columns(2)
@@ -494,11 +529,12 @@ if result is not None:
                         st.toast("Đã bắn Báo cáo Cứng Top 10 qua Telegram!", icon="✈️")
 
     with tab5:
-        st.subheader("🧠 Trạng thái Hệ thống & Cloud Data")
+        st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
-        col_ai1.metric("Lưu trữ đám mây", "Google Sheets API (Đã Kích hoạt)")
-        col_ai2.metric("Lịch sử (Features)", f"{result['data_rows']} nến x {result['features_count']} biến")
-        col_ai3.metric("Lịch gửi Auto-Bot", "Sáng: 9h15 | Chiều: 15h05")
+        col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
+        col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"10 Năm ({result['data_rows']} nến/mã)")
+        col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Mỗi lần tải nến mới trong ngày, AI tự động nối vào chuỗi 10 năm và khởi động lại quá trình `.fit()` để cập nhật kiến thức ngay lập tức.")
 
 # ==========================================
 # CƠ CHẾ AUTO-BOT: LẬP LỊCH BÁO CÁO ĐỊNH KỲ (ĐẦU & CUỐI PHIÊN)
@@ -545,7 +581,7 @@ if auto_bot and bot_token and chat_id:
                 if not good_df.empty:
                     full_msg += "🎯 *TOP CỔ PHIẾU ĐẠT CHUẨN MUA (AI ĐỀ XUẤT):*\n"
                     for _, row in good_df.iterrows():
-                        full_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
+                        full_msg += f"✅ *{row['sym']}* | Mua: {row['Giá Canh Mua']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
                 else:
                     full_msg += "⚠️ *Toàn thị trường KHÔNG CÓ mã nào đạt chuẩn Mua. Nên ôm tiền mặt.*\n"
 
