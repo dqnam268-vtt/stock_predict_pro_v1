@@ -13,14 +13,10 @@ import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# KẾT NỐI MODULE BỘ NÃO VĨ MÔ
 from ai_core import build_features, AIModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# ==========================================
-# CẤU TRÚC DANH MỤC NHÓM NGÀNH
-# ==========================================
 INDUSTRIES = {
     "🏦 Ngân hàng": ["VCB", "BID", "CTG", "MBB", "TCB", "VPB", "ACB", "STB", "SHB", "HDB"],
     "📈 Chứng khoán": ["SSI", "VND", "HCM", "VCI", "VIX", "SHS", "MBS", "FTS", "BSI"],
@@ -42,9 +38,6 @@ def send_telegram_alert(bot_token, chat_id, message):
     try: return requests.post(url, data=payload).status_code == 200
     except: return False
 
-# ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD
-# ==========================================
 class CloudDataLoader:
     def __init__(self):
         self.db = None
@@ -155,13 +148,10 @@ def analyze_symbol(symbol, future_days):
         
     return {'df': df, 'df_feat': df_feat, 'prob': prob, 'all_probs': all_probs, 'future_preds_adapt': future_preds_adapt, 'features_count': len(model.features), 'data_rows': len(df_feat)}
 
-# ==========================================
-# ⚖️ PHẦN 2: LUẬT KỶ LUẬT THỰC CHIẾN (TRỤ CỘT 3)
-# ==========================================
 def run_advanced_backtest(df_bt, nav):
-    fee = 0.0015         # Phí giao dịch 0.15% (Mua & Bán)
-    stop_loss = -0.07    # Tự động cắt lỗ nếu âm 7%
-    take_profit = 0.15   # Tự động chốt lời nếu lãi 15%
+    fee = 0.0015         
+    stop_loss = -0.07    
+    take_profit = 0.15   
     
     capital = nav
     in_position = False
@@ -187,37 +177,28 @@ def run_advanced_backtest(df_bt, nav):
         current_price = row['close']
         prob = row['prob']
         
-        # 1. TRẠNG THÁI ĐANG ÔM HÀNG -> CANH BÁN
         if in_position:
             days_held += 1
             unrealized_return = (current_price - entry_price) / entry_price
-            
-            # Kỷ luật T+2.5: Phải cầm qua 3 cây nến mới được bán
             if days_held >= 3:
-                # KIỂM TRA LUẬT: Cắt Lỗ (-7%) HOẶC Chốt Lời (15%) HOẶC AI đổi ý (Xác suất rớt < 48%)
                 if unrealized_return <= stop_loss or unrealized_return >= take_profit or prob < 0.48:
-                    capital = shares * current_price * (1 - fee) # Trừ phí bán
+                    capital = shares * current_price * (1 - fee) 
                     total_trades += 1
-                    
-                    # Đánh giá xem lệnh vừa rồi Lãi hay Lỗ (sau khi trừ phí)
                     if (current_price * (1 - fee)) > (entry_price * (1 + fee)): 
                         winning_trades += 1
-                        
                     in_position = False
                     shares = 0
                     entry_price = 0
                     days_held = 0
                     
-        # 2. TRẠNG THÁI CẦM TIỀN MẶT -> CANH MUA
         if not in_position:
             if prob > 0.55: 
                 in_position = True
                 entry_price = current_price
-                investable_capital = capital * (1 - fee) # Trừ phí mua
+                investable_capital = capital * (1 - fee) 
                 shares = investable_capital / entry_price
                 days_held = 0
                 
-        # 3. GHI CHÉP BIẾN ĐỘNG TÀI SẢN MỖI NGÀY
         if in_position:
             daily_equity = shares * current_price
         else:
@@ -233,9 +214,6 @@ def run_advanced_backtest(df_bt, nav):
     return df_bt, win_rate, total_trades
 
 
-# ==========================================
-# PHẦN 3: GIAO DIỆN APP (UI)
-# ==========================================
 st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 
 with st.sidebar:
@@ -261,9 +239,9 @@ with st.sidebar:
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
+if st.button("🔄 Xóa Nhớ Đệm & Nạp Lại Dữ Liệu", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới để AI nạp lại bộ dữ liệu Vĩ mô!")
+    st.success("Đã xóa bộ nhớ đệm. AI sẵn sàng học bộ Chỉ báo Đa Khung Thời Gian mới!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -303,6 +281,9 @@ if result is not None:
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
+    
+    # Lấy tín hiệu Khung Tuần
+    mtf_trend = latest_row['mtf_trend_up'].values[0]
         
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
@@ -329,7 +310,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến (MỚI)", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 CÔNG CỤ XÂY KHO"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -339,6 +320,12 @@ if result is not None:
             st.write("---")
             st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
             st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
+            
+            # HIỂN THỊ CẢNH BÁO KHUNG TUẦN CHO USER
+            if mtf_trend == 1:
+                st.write("- **Khung Tuần:** Đồng thuận Tăng 📈")
+            else:
+                st.write("- **Khung Tuần:** Đang rủi ro (Nên cẩn trọng) ⚠️")
 
         with col2:
             st.subheader(f"Biểu đồ Đa chiều - {symbol}")
@@ -375,7 +362,6 @@ if result is not None:
         bt_df_current = df_feat.tail(bt_days_actual_single).copy()
         bt_df_current['prob'] = all_probs[-bt_days_actual_single:]
         
-        # GỌI HÀM KỶ LUẬT THỰC CHIẾN
         bt_df_current, win_rate_single, total_trades_single = run_advanced_backtest(bt_df_current, nav)
         
         fig_bt = go.Figure()
@@ -466,7 +452,6 @@ if result is not None:
                     bt_df = df_f_bt.tail(bt_days_actual).copy()
                     bt_df['prob'] = res_bt['all_probs'][-bt_days_actual:]
                     
-                    # Đưa vào Kỷ luật thực chiến
                     bt_df, win_rate_pct, total_tr = run_advanced_backtest(bt_df, nav)
                     
                     final_equity = bt_df['strategy_equity'].iloc[-1]
@@ -580,9 +565,6 @@ if result is not None:
                 
             status_text.success("✅ XÂY KHO HOÀN TẤT 100%! Toàn bộ 50 mã đã có mặt trên Google Sheet. Từ giờ App sẽ chạy với tốc độ ánh sáng!")
 
-# ==========================================
-# CƠ CHẾ AUTO-BOT: LẬP LỊCH BÁO CÁO ĐỊNH KỲ (ĐẦU & CUỐI PHIÊN)
-# ==========================================
 if auto_bot and bot_token and chat_id:
     vn_time = datetime.utcnow() + timedelta(hours=7)
     today_str = vn_time.strftime("%Y-%m-%d")

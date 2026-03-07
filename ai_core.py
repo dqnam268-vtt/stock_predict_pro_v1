@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
-from sklearn.model_selection import RandomizedSearchCV # Thêm thư viện Dò tìm tự động
+from sklearn.model_selection import RandomizedSearchCV
 
 def build_features(df):
     df = df.copy()
@@ -76,18 +76,33 @@ def build_features(df):
         df['month'] = df.index.month
         df['day_of_week'] = df.index.dayofweek
 
+    # ========================================================
+    # --- 6. KHUNG ĐA THỜI GIAN (MULTI-TIMEFRAME) MỚI ---
+    # ========================================================
+    # Quy đổi: 1 Tuần = 5 phiên giao dịch. 
+    # Đường EMA 12 tuần = 60 phiên, EMA 26 tuần = 130 phiên.
+    w_ema12 = df['close'].ewm(span=60, adjust=False).mean()
+    w_ema26 = df['close'].ewm(span=130, adjust=False).mean()
+    df['weekly_macd'] = w_ema12 - w_ema26
+    df['weekly_macd_signal'] = df['weekly_macd'].ewm(span=45, adjust=False).mean() # 9 tuần = 45 phiên
+    df['weekly_macd_hist'] = df['weekly_macd'] - df['weekly_macd_signal']
+    
+    # Cờ đánh dấu: 1 = Xu hướng Tuần đang ủng hộ (Đồng pha), 0 = Đang cắm đầu
+    df['mtf_trend_up'] = (df['weekly_macd_hist'] > 0).astype(int)
+    
+    # Đà tăng trung hạn (Đo lường quán tính 4 tuần qua)
+    df['momentum_4w'] = df['close'] / df['close'].shift(20) - 1
+
     return df.dropna()
 
 class AIModel:
     def __init__(self):
-        # 1. Khởi tạo "Phôi não" trống
         self.base_model = XGBClassifier(
             objective='binary:logistic', 
             random_state=42,
             eval_metric='logloss'
         )
         
-        # 2. Khai báo không gian tiến hóa (Tủ quần áo thông số)
         self.param_grid = {
             'n_estimators': [100, 200, 300, 400],
             'max_depth': [3, 5, 7],
@@ -95,14 +110,13 @@ class AIModel:
             'subsample': [0.7, 0.8, 0.9],
             'colsample_bytree': [0.7, 0.8, 0.9]
         }
-        
-        # Mô hình chính thức sẽ được cấp sau khi thi tuyển
         self.model = None 
         
         self.features = [
             'returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 
             'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14',
-            'bb_width', 'bb_pct_b', 'atr_ratio', 'cmf_20', 'month', 'day_of_week'
+            'bb_width', 'bb_pct_b', 'atr_ratio', 'cmf_20', 'month', 'day_of_week',
+            'weekly_macd_hist', 'mtf_trend_up', 'momentum_4w' # Nạp 3 giác quan Khung Tuần vào AI
         ]
     
     def train(self, df):
@@ -112,24 +126,17 @@ class AIModel:
         X = df[self.features]
         y = df['target']
         
-        # 3. MỞ HỘP TÌM KIẾM TỰ ĐỘNG (HYPERPARAMETER TUNING)
-        # Random chọn ra 5 tổ hợp xuất sắc nhất để thi đấu (tối ưu tốc độ web)
         search = RandomizedSearchCV(
             estimator=self.base_model,
             param_distributions=self.param_grid,
-            n_iter=5,        # Số lần bốc thăm thử nghiệm
-            cv=3,            # Cross-validation (thi đấu 3 vòng)
+            n_iter=5,        
+            cv=3,            
             scoring='accuracy',
             random_state=42,
-            n_jobs=-1        # Tận dụng tối đa CPU của máy chủ
+            n_jobs=-1        
         )
-        
-        # Bắt đầu thi tuyển
         search.fit(X, y)
-        
-        # 4. Gắn bộ não đạt giải Nhất làm bộ não chính thức để trade
         self.model = search.best_estimator_
         
     def predict_prob(self, df):
-        # Dùng bộ não đã tinh chỉnh tối ưu nhất để đưa ra tỷ lệ %
         return self.model.predict_proba(df[self.features])[:, 1]
