@@ -8,3 +8,5 @@ altair<5
 plotly
 requests
 matplotlib
+gspread
+oauth2client

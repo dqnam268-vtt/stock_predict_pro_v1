@@ -9,7 +9,9 @@ from datetime import datetime, timedelta
 import sys
 import os
 import requests
-import time  # THÊM THƯ VIỆN NÀY ĐỂ XỬ LÝ CHỐNG BLOCK
+import time
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,8 +28,9 @@ INDUSTRIES = {
     "🚢 Cảng biển & Thủy sản": ["HAH", "GMD", "VSC", "VHC", "ANV", "FMC"]
 }
 
-if 'last_alert' not in st.session_state:
-    st.session_state['last_alert'] = ""
+if 'last_alert' not in st.session_state: st.session_state['last_alert'] = ""
+if 'morning_date' not in st.session_state: st.session_state['morning_date'] = None
+if 'afternoon_date' not in st.session_state: st.session_state['afternoon_date'] = None
 
 def send_telegram_alert(bot_token, chat_id, message):
     if not bot_token or not chat_id: return False
@@ -37,31 +40,71 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: TẢI DỮ LIỆU (CÓ CƠ CHẾ CHỐNG BAN CỦA YAHOO)
+# PHẦN 1: KHO DỮ LIỆU CLOUD & AI MODEL
 # ==========================================
-class DataLoader:
-    def get_data(self, symbol, days=1095):
-        yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
+class CloudDataLoader:
+    def __init__(self):
+        self.db = None
+        try:
+            self.sheet_id = st.secrets["SHEET_ID"]
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            self.client = gspread.authorize(creds)
+            self.db = self.client.open_by_key(self.sheet_id)
+        except Exception as e:
+            st.warning("⚠️ Lỗi kết nối Google Sheet. Đang dùng dữ liệu từ Yahoo.")
+
+    def download_yf(self, yf_symbol, start, end):
         df = pd.DataFrame()
-        # CƠ CHẾ AUTO-RETRY: Cố gắng tải 3 lần nếu bị Yahoo chặn
         for attempt in range(3):
             try:
                 ticker = yf.Ticker(yf_symbol)
-                df = ticker.history(start=start_date, end=end_date)
-                if not df.empty:
-                    break # Tải thành công thì thoát vòng lặp
-            except Exception as e:
-                time.sleep(2) # Bị chặn thì nghỉ 2 giây rồi thử lại
-                
+                df = ticker.history(start=start, end=end)
+                if not df.empty: break
+            except: time.sleep(1)
         if df.empty: return pd.DataFrame()
-            
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
         if 'date' in df.columns and df['date'].dt.tz is not None:
             df['date'] = df['date'].dt.tz_localize(None)
+        return df
+
+    def get_data(self, symbol, days=1095):
+        yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        if self.db is None: return self.download_yf(yf_symbol, start_date, end_date)
+
+        try:
+            worksheet = self.db.worksheet(symbol)
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+            if not df.empty: df['date'] = pd.to_datetime(df['date'])
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = self.db.add_worksheet(title=symbol, rows="1000", cols="6")
+            df = pd.DataFrame()
+        except Exception as e:
+            return self.download_yf(yf_symbol, start_date, end_date)
+
+        if df.empty:
+            df = self.download_yf(yf_symbol, start_date, end_date)
+            if not df.empty:
+                df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
+                df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
+                worksheet.clear()
+                worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
+        else:
+            last_date = df['date'].max()
+            if end_date.date() > last_date.date() and end_date.weekday() < 5:
+                new_start = last_date + timedelta(days=1)
+                new_df = self.download_yf(yf_symbol, new_start, end_date)
+                if not new_df.empty:
+                    df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
+                    df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
+                    worksheet.append_rows(df_save.values.tolist())
+                    df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
         return df
 
 def build_features(df):
@@ -102,10 +145,10 @@ class AIModel:
     def predict_prob(self, df):
         return self.model.predict_proba(df[self.features])[:, 1]
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
-    time.sleep(0.5) # BỘ GIẢM XÓC: Nghỉ nửa giây trước khi soi mã mới để không bị Yahoo khóa mõm
-    df = DataLoader().get_data(symbol)
+    time.sleep(0.5) 
+    df = CloudDataLoader().get_data(symbol)
     if df.empty or len(df) < 50: return None
     
     df_feat = build_features(df)
@@ -144,27 +187,27 @@ with st.sidebar:
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-        st.success("✅ Đã kết nối khóa bảo mật!")
+        st.success("✅ Đã kết nối khóa bảo mật Cloud!")
     except:
         bot_token = st.text_input("🔑 Bot Token:", type="password")
         chat_id = st.text_input("💬 Chat ID:")
     
     if st.button("🔔 Gửi Test", use_container_width=True):
         if bot_token and chat_id:
-            if send_telegram_alert(bot_token, chat_id, "✅ Hệ thống AI Quant đang hoạt động."):
+            if send_telegram_alert(bot_token, chat_id, "✅ Hệ thống AI Quant đang hoạt động tốt."):
                 st.success("Đã gửi tin nhắn test!")
             else: st.error("Gửi thất bại.")
     
     st.markdown("---")
     st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
-    auto_bot = st.toggle("📡 Bật Auto-Bot (Quét Ngầm)", value=False)
-    st.caption("AI sẽ tự chạy ngầm tìm Top 5 mã xịn nhất toàn thị trường và báo về điện thoại. Có chống Spam, chỉ báo khi có mã lọt top mới.")
+    auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
+    st.caption("AI tự chạy ngầm. Sẽ gửi Báo cáo Đầu Phiên (9h15) và Đóng Phiên (15h05) bao gồm toàn thị trường.")
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Cập nhật Dữ liệu Real-time (Làm mới AI)", use_container_width=True):
+if st.button("🔄 Cập nhật Dữ liệu Real-time", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ. Radar sẽ tải lại dữ liệu sạch!")
+    st.success("Đã làm mới bộ nhớ. Dữ liệu mới nhất đã sẵn sàng!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -190,7 +233,7 @@ else: future_days = 21
 
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "Toàn bộ lịch sử": 750}
 
-with st.spinner(f"Đang phân tích {symbol}..."):
+with st.spinner(f"Đang kết nối kho dữ liệu lấy mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -230,7 +273,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu (Top 5)", "📈 Xếp Hạng Ngành", "🧠 Trạng thái Học Máy"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Backtest Mã Hiện Tại", "🏆 Radar Tín Hiệu (Top 5)", "📈 Xếp Hạng Ngành", "🧠 Trạng thái Hệ thống"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -340,16 +383,25 @@ if result is not None:
                     send_telegram_alert(bot_token, chat_id, final_msg)
                     st.toast("Đã lọc và gửi báo cáo Top 5 qua Telegram!", icon="✈️")
 
+    # ==========================================
+    # TAB 4: BẢNG XẾP HẠNG NGÀNH + ĐÁNH GIÁ CỨNG TOP 10
+    # ==========================================
     with tab4:
         st.subheader(f"📈 Bảng Xếp Hạng Lãi/Lỗ: Nhóm {selected_sector}")
-        st.write("Bảng này giúp thầy chọn ra 'Con ngựa chiến' tốt nhất trong ngành để đầu tư.")
-        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
+        bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", ["1 Tháng qua", "3 Tháng qua", "6 Tháng qua", "1 Năm qua", "Toàn bộ lịch sử"], index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
-        if st.button("🔄 Xếp Hạng & Chấm Điểm Lãi/Lỗ Nhóm Ngành", type="secondary"):
-            with st.spinner("Đang cho AI chạy Backtest từng mã trong ngành..."):
+        # HAI NÚT BẤM SANG TRỌNG ĐƯỢC CHIA CỘT
+        col_btn_t4_1, col_btn_t4_2 = st.columns(2)
+        with col_btn_t4_1:
+            btn_rank_sector = st.button("🔄 Xếp Hạng Lãi/Lỗ Nhóm Ngành", type="secondary")
+        with col_btn_t4_2:
+            btn_top10_all = st.button("🏆 Đánh Giá Cứng Top 10 Toàn TT (Gửi Bot)", type="primary")
+
+        # Logic khi bấm nút quét Nhóm Ngành
+        if btn_rank_sector:
+            with st.spinner("Đang chạy Backtest từng mã trong ngành..."):
                 all_bt_results = []
-                # Thêm thanh tiến trình để người dùng không sốt ruột
                 bt_progress = st.progress(0)
                 for idx, sym in enumerate(current_tickers):
                     res_bt = analyze_symbol(sym, future_days)
@@ -373,49 +425,168 @@ if result is not None:
                     win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
                     all_bt_results.append({"Mã CP": sym, "Hiệu suất AI": profit_pct / 100, "So với Mua & Giữ": (profit_pct - bnh_profit_pct) / 100, "Tỷ lệ Thắng": win_rate / 100, "Rủi ro (Drawdown)": max_dd / 100})
                     bt_progress.progress((idx + 1) / len(current_tickers))
-                
                 bt_progress.empty()
             if all_bt_results:
                 df_bt_all = pd.DataFrame(all_bt_results).sort_values(by="Hiệu suất AI", ascending=False).reset_index(drop=True)
                 st.dataframe(df_bt_all.style.format({"Hiệu suất AI": "{:+.2%}", "So với Mua & Giữ": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Rủi ro (Drawdown)": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI", "Tỷ lệ Thắng"], cmap="RdYlGn"), use_container_width=True)
 
+        # Logic khi bấm nút Đánh Giá Cứng Top 10
+        if btn_top10_all:
+            with st.spinner("Đang cày xới 50 mã để tìm ra 10 'Con ngựa chiến' xuất sắc nhất lịch sử..."):
+                all_top10_results = []
+                all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
+                bt_progress = st.progress(0)
+                
+                for idx, sym in enumerate(all_tickers_list):
+                    res_bt = analyze_symbol(sym, future_days)
+                    if not res_bt: continue
+                    
+                    # 1. Tính toán Năng lực Lịch sử (Hiệu suất Backtest)
+                    df_f_bt = res_bt['df_feat']
+                    bt_days_actual = min(bt_days_all, len(df_f_bt))
+                    bt_df = df_f_bt.tail(bt_days_actual).copy()
+                    bt_df['prob'] = res_bt['all_probs'][-bt_days_actual:]
+                    bt_df['signal'] = np.where(bt_df['prob'] > 0.55, 1, 0)
+                    bt_df['daily_return'] = bt_df['returns']
+                    bt_df['strategy_return'] = bt_df['signal'].shift(1) * bt_df['daily_return']
+                    bt_df['strategy_equity'] = nav * np.exp(bt_df['strategy_return'].fillna(0).cumsum())
+                    profit_pct = (bt_df['strategy_equity'].iloc[-1] / nav - 1) * 100
+                    winning_days = len(bt_df[(bt_df['signal'].shift(1) == 1) & (bt_df['daily_return'] > 0)])
+                    total_traded_days = len(bt_df[bt_df['signal'].shift(1) == 1])
+                    win_rate = (winning_days / total_traded_days * 100) if total_traded_days > 0 else 0
+                    
+                    # 2. Tính toán Tín hiệu Mua hiện tại
+                    scan_prob = res_bt['prob']
+                    scan_preds = res_bt['future_preds_adapt']
+                    min_idx = int(np.argmin(scan_preds))
+                    buy_p = scan_preds[min_idx]
+                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100 if min_idx + 3 < len(scan_preds) else 0
+                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+
+                    all_top10_results.append({
+                        "Mã CP": sym, 
+                        "Hiệu suất AI": profit_pct / 100, 
+                        "Tỷ lệ Thắng": win_rate / 100,
+                        "Giá Canh Mua": buy_p,
+                        "Kelly Mua Mới": scan_kelly / 100
+                    })
+                    bt_progress.progress((idx + 1) / len(all_tickers_list))
+                
+                bt_progress.empty()
+                
+                # 3. Lọc Top 10 và Gửi Telegram
+                if all_top10_results:
+                    df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Hiệu suất AI", ascending=False).head(10).reset_index(drop=True)
+                    st.success("Đã tìm ra Bảng Phong Thần Top 10 Toàn Thị Trường!")
+                    st.dataframe(df_top10.style.format({"Hiệu suất AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Hiệu suất AI"], cmap="RdYlGn"), use_container_width=True)
+                    
+                    if bot_token and chat_id:
+                        msg = f"🏆 *ĐÁNH GIÁ CỨNG: TOP 10 CỔ PHIẾU XUẤT SẮC NHẤT* 🏆\n_(Xếp hạng theo năng lực sinh lời {bt_timeframe_all})_\n\n"
+                        for rank, row in df_top10.iterrows():
+                            sym = row['Mã CP']
+                            perf = row['Hiệu suất AI'] * 100
+                            win = row['Tỷ lệ Thắng'] * 100
+                            buy = row['Giá Canh Mua']
+                            kel = row['Kelly Mua Mới'] * 100
+                            
+                            msg += f"*{rank + 1}. {sym}* | Lãi mô phỏng: {perf:+.1f}% | Win: {win:.0f}%\n"
+                            if kel > 0:
+                                msg += f"👉 *Đang có Tín hiệu:* 🟢 CANH MUA {buy:,.0f}đ (Vào {kel:.1f}% vốn)\n\n"
+                            else:
+                                msg += f"👉 *Hiện tại:* ➖ Đứng ngoài quan sát\n\n"
+                            
+                        send_telegram_alert(bot_token, chat_id, msg)
+                        st.toast("Đã bắn Báo cáo Cứng Top 10 qua Telegram!", icon="✈️")
+
     with tab5:
-        st.subheader("🧠 Trạng thái Hoạt động của Trí tuệ Nhân tạo")
+        st.subheader("🧠 Trạng thái Hệ thống & Cloud Data")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
-        col_ai1.metric("Thuật toán Lõi", "XGBoost ML")
-        col_ai2.metric("Dữ liệu Lịch sử (Features)", f"{result['data_rows']} phiên x {result['features_count']} biến")
-        col_ai3.metric("Danh mục Quét Lọc", f"{sum(len(v) for v in INDUSTRIES.values())} mã (7 Ngành lớn)")
-        st.progress(100, text="✅ Trạng thái: Hệ thống đang chạy Ổn định và Chống Block (Anti-Ban) tốt.")
+        col_ai1.metric("Lưu trữ đám mây", "Google Sheets API (Đã Kích hoạt)")
+        col_ai2.metric("Lịch sử (Features)", f"{result['data_rows']} nến x {result['features_count']} biến")
+        col_ai3.metric("Lịch gửi Auto-Bot", "Sáng: 9h15 | Chiều: 15h05")
 
 # ==========================================
-# CƠ CHẾ AUTO-BOT (CẮM MÁY CHẠY NGẦM)
+# CƠ CHẾ AUTO-BOT: LẬP LỊCH BÁO CÁO ĐỊNH KỲ (ĐẦU & CUỐI PHIÊN)
 # ==========================================
 if auto_bot and bot_token and chat_id:
-    auto_results = []
-    all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
-    for sym in all_tickers:
-        res = analyze_symbol(sym, future_days)
-        if not res: continue
-        scan_prob = res['prob']
-        scan_preds = res['future_preds_adapt']
-        min_idx = int(np.argmin(scan_preds))
-        buy_p = scan_preds[min_idx]
-        scan_profit = 0
-        if min_idx + 3 < len(scan_preds):
-            scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
-        scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
-        if scan_kelly > 0:
-            auto_results.append({"sym": sym, "buy": buy_p, "profit": scan_profit, "kelly": scan_kelly})
+    vn_time = datetime.utcnow() + timedelta(hours=7)
+    today_str = vn_time.strftime("%Y-%m-%d")
+    
+    if vn_time.weekday() < 5:
+        is_morning_time = (vn_time.hour == 9 and vn_time.minute >= 15) or (vn_time.hour == 10 and vn_time.minute <= 0)
+        is_afternoon_time = (vn_time.hour == 15 and vn_time.minute >= 5) or (vn_time.hour == 16 and vn_time.minute <= 0)
+
+        trigger_morning = is_morning_time and (st.session_state.get('morning_date') != today_str)
+        trigger_afternoon = is_afternoon_time and (st.session_state.get('afternoon_date') != today_str)
+
+        if trigger_morning or trigger_afternoon:
+            all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
+            radar_results = []
             
-    if auto_results:
-        auto_df = pd.DataFrame(auto_results).sort_values(by="kelly", ascending=False).head(5)
-        auto_msg = "🤖 *TÍN HIỆU NGẦM TỪ BOT (TOP 5)* 🤖\n\n"
-        for _, row in auto_df.iterrows():
-            auto_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}%\n"
-            
-        if auto_msg != st.session_state['last_alert']:
-            send_telegram_alert(bot_token, chat_id, auto_msg)
-            st.session_state['last_alert'] = auto_msg
+            for sym in all_tickers:
+                res = analyze_symbol(sym, future_days)
+                if not res: continue
+                scan_prob = res['prob']
+                scan_preds = res['future_preds_adapt']
+                min_idx = int(np.argmin(scan_preds))
+                buy_p = scan_preds[min_idx]
+                scan_profit = 0
+                if min_idx + 3 < len(scan_preds):
+                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
+                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                
+                radar_results.append({
+                    "sym": sym, "buy": buy_p, "profit": scan_profit, "kelly": scan_kelly, "prob": scan_prob
+                })
+
+            if radar_results:
+                radar_df = pd.DataFrame(radar_results).sort_values(by=["kelly", "prob"], ascending=[False, False])
+                good_df = radar_df[radar_df["kelly"] > 0]
+                bad_df = radar_df[radar_df["kelly"] == 0]
+                
+                session_name = "🌅 ĐẦU PHIÊN SÁNG" if trigger_morning else "🌇 TỔNG KẾT PHIÊN CHIỀU"
+                full_msg = f"🔔 *BÁO CÁO TOÀN THỊ TRƯỜNG: {session_name}* ({vn_time.strftime('%d/%m')})\n\n"
+                
+                if not good_df.empty:
+                    full_msg += "🎯 *TOP CỔ PHIẾU ĐẠT CHUẨN MUA (AI ĐỀ XUẤT):*\n"
+                    for _, row in good_df.iterrows():
+                        full_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
+                else:
+                    full_msg += "⚠️ *Toàn thị trường KHÔNG CÓ mã nào đạt chuẩn Mua. Nên ôm tiền mặt.*\n"
+
+                if not bad_df.empty:
+                    full_msg += "\n📊 *TRẠNG THÁI 50 MÃ QUAN SÁT (Xếp hạng Xác suất Tăng):*\n"
+                    bad_list = [f"{row['sym']}({row['prob']*100:.0f}%)" for _, row in bad_df.iterrows()]
+                    full_msg += " | ".join(bad_list)
+                    
+                send_telegram_alert(bot_token, chat_id, full_msg)
+                
+                if trigger_morning: st.session_state['morning_date'] = today_str
+                if trigger_afternoon: st.session_state['afternoon_date'] = today_str
+                
+        elif (vn_time.hour >= 9 and vn_time.hour < 15):
+            auto_results = []
+            all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
+            for sym in all_tickers:
+                res = analyze_symbol(sym, future_days)
+                if not res: continue
+                scan_prob = res['prob']
+                scan_preds = res['future_preds_adapt']
+                min_idx = int(np.argmin(scan_preds))
+                scan_profit = (max(scan_preds[min_idx + 3:]) - scan_preds[min_idx]) / scan_preds[min_idx] * 100 if min_idx + 3 < len(scan_preds) else 0
+                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                if scan_kelly > 0:
+                    auto_results.append({"sym": sym, "buy": scan_preds[min_idx], "profit": scan_profit, "kelly": scan_kelly})
+                    
+            if auto_results:
+                auto_df = pd.DataFrame(auto_results).sort_values(by="kelly", ascending=False).head(5)
+                auto_msg = "🤖 *BÁO CÁO CẬP NHẬT TRONG PHIÊN (TOP 5)* 🤖\n\n"
+                for _, row in auto_df.iterrows():
+                    auto_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}%\n"
+                    
+                if auto_msg != st.session_state['last_alert']:
+                    send_telegram_alert(bot_token, chat_id, auto_msg)
+                    st.session_state['last_alert'] = auto_msg
 
 else: 
     if not result: st.error("Không thể kết nối dữ liệu.")
