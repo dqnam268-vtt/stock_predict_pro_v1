@@ -13,10 +13,14 @@ import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# KẾT NỐI MODULE BỘ NÃO VĨ MÔ
 from ai_core import build_features, AIModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# ==========================================
+# CẤU TRÚC DANH MỤC NHÓM NGÀNH
+# ==========================================
 INDUSTRIES = {
     "🏦 Ngân hàng": ["VCB", "BID", "CTG", "MBB", "TCB", "VPB", "ACB", "STB", "SHB", "HDB"],
     "📈 Chứng khoán": ["SSI", "VND", "HCM", "VCI", "VIX", "SHS", "MBS", "FTS", "BSI"],
@@ -38,6 +42,9 @@ def send_telegram_alert(bot_token, chat_id, message):
     try: return requests.post(url, data=payload).status_code == 200
     except: return False
 
+# ==========================================
+# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ TÍNH NĂNG LƯU BẢNG PHONG THẦN)
+# ==========================================
 class CloudDataLoader:
     def __init__(self):
         self.db = None
@@ -116,6 +123,31 @@ class CloudDataLoader:
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
                     except: pass
         return df
+
+    # --- TÍNH NĂNG MỚI: LƯU VÀ TẢI BẢNG PHONG THẦN ---
+    def save_leaderboard(self, df_leaderboard):
+        if self.db is None: return False
+        try:
+            worksheet = self.db.worksheet("Top_10_Leaderboard")
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                worksheet = self.db.add_worksheet(title="Top_10_Leaderboard", rows="50", cols="10")
+            except: return False
+        try:
+            time.sleep(1)
+            worksheet.clear()
+            worksheet.append_rows([df_leaderboard.columns.values.tolist()] + df_leaderboard.values.tolist())
+            return True
+        except: return False
+
+    def load_leaderboard(self):
+        if self.db is None: return pd.DataFrame()
+        try:
+            worksheet = self.db.worksheet("Top_10_Leaderboard")
+            data = worksheet.get_all_records()
+            return pd.DataFrame(data)
+        except:
+            return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
@@ -213,7 +245,9 @@ def run_advanced_backtest(df_bt, nav):
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return df_bt, win_rate, total_trades
 
-
+# ==========================================
+# PHẦN 3: GIAO DIỆN APP (UI)
+# ==========================================
 st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 
 with st.sidebar:
@@ -239,9 +273,9 @@ with st.sidebar:
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Xóa Nhớ Đệm & Nạp Lại Dữ Liệu", use_container_width=True):
+if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ đệm. AI sẵn sàng học bộ Chỉ báo Đa Khung Thời Gian mới!")
+    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới để AI nạp lại bộ dữ liệu Vĩ mô!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -281,8 +315,6 @@ if result is not None:
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
-    
-    # Lấy tín hiệu Khung Tuần
     mtf_trend = latest_row['mtf_trend_up'].values[0]
         
     last_date = df['date'].iloc[-1]
@@ -321,7 +353,6 @@ if result is not None:
             st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
             st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
             
-            # HIỂN THỊ CẢNH BÁO KHUNG TUẦN CHO USER
             if mtf_trend == 1:
                 st.write("- **Khung Tuần:** Đồng thuận Tăng 📈")
             else:
@@ -434,11 +465,14 @@ if result is not None:
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
-        col_btn_t4_1, col_btn_t4_2 = st.columns(2)
+        # CHIA LÀM 3 NÚT QUYỀN LỰC
+        col_btn_t4_1, col_btn_t4_2, col_btn_t4_3 = st.columns(3)
         with col_btn_t4_1:
-            btn_rank_sector = st.button("🔄 Xếp Hạng Lãi/Lỗ Nhóm Ngành", type="secondary")
+            btn_rank_sector = st.button("🔄 Xếp Hạng Nhóm Ngành", type="secondary", use_container_width=True)
         with col_btn_t4_2:
-            btn_top10_all = st.button("🏆 Đánh Giá Cứng Top 10 Toàn TT", type="primary")
+            btn_view_top10 = st.button("⚡ Xem Bảng Phong Thần (0.1s)", type="primary", use_container_width=True)
+        with col_btn_t4_3:
+            btn_update_top10 = st.button("⚙️ Cập nhật Bảng (Quét 50 mã)", type="secondary", use_container_width=True)
 
         if btn_rank_sector:
             with st.spinner("Đang chạy Backtest nâng cao từng mã trong ngành..."):
@@ -477,7 +511,27 @@ if result is not None:
                     "Win Rate": "{:.1%}", "Drawdown": "{:.1%}"
                 }).background_gradient(subset=["Lãi ròng AI", "Win Rate"], cmap="RdYlGn"), use_container_width=True)
 
-        if btn_top10_all:
+        # NÚT XEM TỐC ĐỘ ÁNH SÁNG
+        if btn_view_top10:
+            with st.spinner("Đang kéo dữ liệu từ Đám mây..."):
+                loader = CloudDataLoader()
+                df_top10 = loader.load_leaderboard()
+                if not df_top10.empty:
+                    st.success("Tải Bảng Phong Thần thành công trong chớp mắt!")
+                    # Đảm bảo hiển thị đúng định dạng số
+                    try:
+                        for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Kelly Mua Mới"]:
+                            if col in df_top10.columns: df_top10[col] = df_top10[col].astype(float)
+                        if "Giá Canh Mua" in df_top10.columns: df_top10["Giá Canh Mua"] = df_top10["Giá Canh Mua"].astype(float)
+                        
+                        st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
+                    except:
+                        st.dataframe(df_top10, use_container_width=True)
+                else:
+                    st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
+
+        # NÚT ĐI CÀY VÀ LƯU CLOUD
+        if btn_update_top10:
             with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
                 all_top10_results = []
                 all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
@@ -515,11 +569,16 @@ if result is not None:
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
-                    st.success("Đã tìm ra Bảng Phong Thần Top 10 (Đã loại trừ toàn bộ mã ăn Line tốn phí)!")
+                    
+                    # LƯU KẾT QUẢ VÀO GOOGLE SHEET
+                    loader = CloudDataLoader()
+                    loader.save_leaderboard(df_top10)
+                    
+                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet! Từ nay chỉ cần bấm 'Xem Bảng' là hiện ra ngay.")
                     st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
                     
                     if bot_token and chat_id:
-                        msg = f"🏆 *ĐÁNH GIÁ CỨNG: TOP 10 CỔ PHIẾU XUẤT SẮC NHẤT* 🏆\n_(Xếp hạng Lãi ròng {bt_timeframe_all} - Đã trừ phí GD)_\n\n"
+                        msg = f"🏆 *BẢNG PHONG THẦN MỚI ĐƯỢC CẬP NHẬT TRÊN CLOUD* 🏆\n_(Xếp hạng Lãi ròng {bt_timeframe_all} - Đã trừ phí GD)_\n\n"
                         for rank, row in df_top10.iterrows():
                             sym = row['Mã CP']
                             perf = row['Lãi ròng AI'] * 100
@@ -529,12 +588,12 @@ if result is not None:
                             
                             msg += f"*{rank + 1}. {sym}* | Lãi ròng: {perf:+.1f}% | Win: {win:.0f}%\n"
                             if kel > 0:
-                                msg += f"👉 *Đang có Tín hiệu:* 🟢 CANH MUA {buy:,.0f}đ (Vào {kel:.1f}% vốn)\n\n"
+                                msg += f"👉 *🟢 CANH MUA {buy:,.0f}đ* (Vào {kel:.1f}% vốn)\n\n"
                             else:
-                                msg += f"👉 *Hiện tại:* ➖ Đứng ngoài quan sát\n\n"
+                                msg += f"👉 *➖ Đứng ngoài quan sát*\n\n"
                             
                         send_telegram_alert(bot_token, chat_id, msg)
-                        st.toast("Đã bắn Báo cáo Cứng Top 10 qua Telegram!", icon="✈️")
+                        st.toast("Đã bắn Báo cáo Top 10 qua Telegram!", icon="✈️")
 
     with tab5:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
@@ -644,6 +703,3 @@ if auto_bot and bot_token and chat_id:
                 if auto_msg != st.session_state['last_alert']:
                     send_telegram_alert(bot_token, chat_id, auto_msg)
                     st.session_state['last_alert'] = auto_msg
-
-else: 
-    if not result: st.error("Không thể kết nối dữ liệu.")
