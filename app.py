@@ -40,7 +40,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ HỆ THỐNG XUYÊN THỦNG QUOTA)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (TÔN TRỌNG DỮ LIỆU EXCEL CÓ SẴN)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -80,52 +80,51 @@ class CloudDataLoader:
         worksheet = None
         df = pd.DataFrame()
 
-        # --- BƯỚC 1: ĐỌC HOẶC TẠO TAB (CÓ CHỐNG CHẶN 60s) ---
+        # --- BƯỚC 1: ĐỌC DỮ LIỆU TỪ EXCEL NẾU ĐÃ CÓ ---
         try:
             worksheet = self.db.worksheet(symbol)
             data = worksheet.get_all_records()
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
         except gspread.exceptions.WorksheetNotFound:
-            time.sleep(2)
+            time.sleep(1.5)
             try:
                 worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
             except Exception as e:
                 if "429" in str(e) or "Quota" in str(e):
-                    st.toast(f"⏳ Cổng an ninh Google đang chặn mã {symbol}. Đang chờ 60 giây để mở khóa...")
-                    time.sleep(60) # Chờ 1 phút cho Google hạ hỏa
+                    st.toast(f"⏳ Google đang giới hạn tạo Tab mã {symbol}. Đang chờ 60s...")
+                    time.sleep(60)
                     worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
         except Exception as e:
             if "429" in str(e) or "Quota" in str(e):
-                st.toast(f"⏳ Cổng an ninh Google đang chặn đọc mã {symbol}. Đang chờ 60 giây...")
+                st.toast(f"⏳ Cổng an ninh Google đang chặn đọc mã {symbol}. Đang chờ 60s...")
                 time.sleep(60)
                 worksheet = self.db.worksheet(symbol)
                 data = worksheet.get_all_records()
                 df = pd.DataFrame(data)
                 if not df.empty: df['date'] = pd.to_datetime(df['date'])
 
-        # Nếu xui quá vẫn lỗi thì mới dùng Yahoo
         if worksheet is None:
             return self.download_yf(yf_symbol, start_date, end_date)
 
-        # --- BƯỚC 2: GHI 10 NĂM DỮ LIỆU VÀO KHO (CÓ CHỐNG CHẶN 60s) ---
-        if df.empty or len(df) < 2000:
+        # --- BƯỚC 2: CHỈ XỬ LÝ PHẦN BÙ (DELTA UPDATE) ---
+        if df.empty:
+            # Chỉ khi Tab trắng tinh mới tải 10 năm
             df = self.download_yf(yf_symbol, start_date, end_date)
             if not df.empty:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                 try:
-                    time.sleep(2)
+                    time.sleep(1.5)
                     worksheet.clear()
                     worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
                 except Exception as e:
                     if "429" in str(e) or "Quota" in str(e):
-                        st.toast(f"⏳ Tạm dừng 60 giây để đẩy 10 năm dữ liệu {symbol} vào kho Google...")
                         time.sleep(60)
                         worksheet.clear()
                         worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
         else:
-            # Cập nhật dữ liệu hàng ngày (Delta)
+            # CÓ DỮ LIỆU RỒI -> CHỈ TẢI NGÀY CÒN THIẾU VÀ NỐI VÀO ĐUÔI
             last_date = df['date'].max()
             if end_date.date() > last_date.date() and end_date.weekday() < 5:
                 new_start = last_date + timedelta(days=1)
@@ -134,7 +133,7 @@ class CloudDataLoader:
                     df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                     df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                     try:
-                        time.sleep(1)
+                        time.sleep(0.5) # Chỉ nghỉ nửa giây vì việc nối dữ liệu rất nhẹ
                         worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
                     except Exception as e:
@@ -202,7 +201,6 @@ class AIModel:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
-    time.sleep(0.5) 
     df = CloudDataLoader().get_data(symbol)
     if df is None or df.empty or len(df) < 50: return None
     
@@ -260,7 +258,7 @@ with st.sidebar:
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Luyện AI & Xóa Nhớ Đệm", use_container_width=True):
+if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu", use_container_width=True):
     st.cache_data.clear()
     st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới!")
 
@@ -288,7 +286,7 @@ else: future_days = 21
 
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
-with st.spinner(f"Đang phân tích 10 năm dữ liệu mã {symbol}..."):
+with st.spinner(f"Đang đọc dữ liệu từ Excel cho mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -551,9 +549,9 @@ if result is not None:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
-        col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"10 Năm ({result['data_rows']} nến/mã)")
+        col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Mỗi lần tải nến mới trong ngày, AI tự động nối vào chuỗi 10 năm và khởi động lại quá trình `.fit()` để cập nhật kiến thức ngay lập tức.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Mỗi lần chạy, AI mở Sheet ra, chỉ tải thêm những ngày còn thiếu, cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
 
 # ==========================================
 # CƠ CHẾ AUTO-BOT: LẬP LỊCH BÁO CÁO ĐỊNH KỲ (ĐẦU & CUỐI PHIÊN)
