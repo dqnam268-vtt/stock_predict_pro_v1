@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
+from sklearn.model_selection import RandomizedSearchCV # Thêm thư viện Dò tìm tự động
 
 def build_features(df):
     df = df.copy()
@@ -47,13 +48,13 @@ def build_features(df):
     df['vwap_14'] = tp_v.rolling(window=14).sum() / df['volume'].rolling(window=14).sum()
     df['price_to_vwap'] = (df['close'] - df['vwap_14']) / df['vwap_14']
 
-    # --- 2. BOLLINGER BANDS (Đo độ nén giá) ---
+    # --- 2. BOLLINGER BANDS ---
     df['bb_upper'] = ma20 + (std20 * 2)
     df['bb_lower'] = ma20 - (std20 * 2)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / ma20  
     df['bb_pct_b'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-9) 
 
-    # --- 3. ATR (Biên độ dao động thật) ---
+    # --- 3. ATR ---
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -62,12 +63,12 @@ def build_features(df):
     df['atr_14'] = true_range.rolling(14).mean()
     df['atr_ratio'] = df['atr_14'] / df['close']
 
-    # --- 4. CHAIKIN MONEY FLOW (Dấu chân dòng tiền) ---
+    # --- 4. CHAIKIN MONEY FLOW ---
     money_flow_mult = ((df['close'] - df['low']) - (df['high'] - df['close'])) / high_low_diff
     money_flow_vol = money_flow_mult * df['volume']
     df['cmf_20'] = money_flow_vol.rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-9)
 
-    # --- 5. SEASONALITY (Tính chu kỳ) ---
+    # --- 5. SEASONALITY ---
     if 'date' in df.columns:
         df['month'] = df['date'].dt.month
         df['day_of_week'] = df['date'].dt.dayofweek
@@ -79,15 +80,25 @@ def build_features(df):
 
 class AIModel:
     def __init__(self):
-        self.model = XGBClassifier(
-            n_estimators=300, 
-            max_depth=6, 
-            learning_rate=0.03, 
-            subsample=0.8, 
-            colsample_bytree=0.8, 
+        # 1. Khởi tạo "Phôi não" trống
+        self.base_model = XGBClassifier(
             objective='binary:logistic', 
-            random_state=42
+            random_state=42,
+            eval_metric='logloss'
         )
+        
+        # 2. Khai báo không gian tiến hóa (Tủ quần áo thông số)
+        self.param_grid = {
+            'n_estimators': [100, 200, 300, 400],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'subsample': [0.7, 0.8, 0.9],
+            'colsample_bytree': [0.7, 0.8, 0.9]
+        }
+        
+        # Mô hình chính thức sẽ được cấp sau khi thi tuyển
+        self.model = None 
+        
         self.features = [
             'returns', 'volatility', 'z_score', 'macd_hist', 'hurst', 'adl_zscore', 
             'price_to_vwap', 'price_to_ma50', 'price_to_ma200', 'rsi_14',
@@ -97,7 +108,28 @@ class AIModel:
     def train(self, df):
         df['target'] = (df['close'].shift(-3) > df['close'] * 1.015).astype(int)
         df = df.dropna()
-        self.model.fit(df[self.features], df['target'])
+        
+        X = df[self.features]
+        y = df['target']
+        
+        # 3. MỞ HỘP TÌM KIẾM TỰ ĐỘNG (HYPERPARAMETER TUNING)
+        # Random chọn ra 5 tổ hợp xuất sắc nhất để thi đấu (tối ưu tốc độ web)
+        search = RandomizedSearchCV(
+            estimator=self.base_model,
+            param_distributions=self.param_grid,
+            n_iter=5,        # Số lần bốc thăm thử nghiệm
+            cv=3,            # Cross-validation (thi đấu 3 vòng)
+            scoring='accuracy',
+            random_state=42,
+            n_jobs=-1        # Tận dụng tối đa CPU của máy chủ
+        )
+        
+        # Bắt đầu thi tuyển
+        search.fit(X, y)
+        
+        # 4. Gắn bộ não đạt giải Nhất làm bộ não chính thức để trade
+        self.model = search.best_estimator_
         
     def predict_prob(self, df):
+        # Dùng bộ não đã tinh chỉnh tối ưu nhất để đưa ra tỷ lệ %
         return self.model.predict_proba(df[self.features])[:, 1]
