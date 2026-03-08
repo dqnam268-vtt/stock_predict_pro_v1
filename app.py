@@ -71,7 +71,7 @@ class CloudDataLoader:
         
         df = pd.DataFrame()
         
-        # CƠ CHẾ ĐA NGUỒN: Thử lần lượt các Cty Chứng Khoán không chặn Streamlit
+        # CƠ CHẾ ĐA NGUỒN (MULTI-PROVIDERS): Thử lần lượt các Cty Chứng Khoán không chặn Streamlit
         providers = ['SSI', 'DNSE', 'VND', 'VCI'] 
         
         for provider in providers:
@@ -79,12 +79,9 @@ class CloudDataLoader:
                 quote = Quote(symbol=symbol, source=provider)
                 df = quote.history(start=start_str, end=end_str, interval='1D')
                 if df is not None and not df.empty: 
-                    # Nếu lấy thành công thì thoát vòng lặp ngay
-                    break
+                    break # Nếu lấy thành công thì thoát vòng lặp ngay
             except Exception:
-                # Nếu bị lỗi (như VCI chặn hoặc TCBS sập), bỏ qua và thử nguồn tiếp theo
-                time.sleep(0.5)
-                continue
+                continue # Bị chặn thì lẳng lặng sang nhà cung cấp khác
                 
         if df is None or df.empty: 
             return pd.DataFrame()
@@ -109,23 +106,19 @@ class CloudDataLoader:
         if df is None or df.empty: return df
         df = df.copy()
         
-        # 1. Ép kiểu số chuẩn (Khử rắc rối dấu phẩy của Google Sheet VN)
         for col in ['open', 'high', 'low', 'close', 'volume']:
             if df[col].dtype == object:
                 df[col] = df[col].astype(str).str.replace(',', '.', regex=False).str.strip()
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # 2. Tiêu diệt nến rác (Giá = 0 hoặc Giá > 2 triệu VNĐ)
         invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
         df.loc[invalid_rows, ['open', 'high', 'low', 'close', 'volume']] = np.nan
-        
-        # 3. Lấp đầy lỗ hổng bằng giá của ngày hôm trước
         df.ffill(inplace=True)
         df.dropna(inplace=True)
         return df
 
     def get_data(self, symbol, days=3650):
-        vn_symbol = symbol.replace('.VN', '') # Đảm bảo mã thuần Việt Nam
+        vn_symbol = symbol.replace('.VN', '') 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
@@ -136,20 +129,13 @@ class CloudDataLoader:
         df = pd.DataFrame()
 
         try:
+            # Nếu Google chặn do chạm ngưỡng Quota, hệ thống sẽ tự động văng lỗi và nhảy xuống except
             worksheet = self.db.worksheet(vn_symbol)
             data = worksheet.get_all_records()
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
-        except gspread.exceptions.WorksheetNotFound:
-            try:
-                time.sleep(1)
-                worksheet = self.db.add_worksheet(title=vn_symbol, rows="4000", cols="6")
-            except:
-                return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
         except Exception:
-            return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
-
-        if worksheet is None: 
+            # LÁCH LUẬT: Nếu bị Google Sheets chặn tải, lôi thẳng dữ liệu từ RAM của Vnstock để Web không sập
             return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
 
         if df.empty:
@@ -158,10 +144,9 @@ class CloudDataLoader:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                 try:
-                    time.sleep(1)
                     worksheet.clear()
                     worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
-                except: pass
+                except Exception: pass
         else:
             last_date = df['date'].max()
             if end_date.date() > last_date.date() and end_date.weekday() < 5:
@@ -171,10 +156,9 @@ class CloudDataLoader:
                     df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                     df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                     try:
-                        time.sleep(0.5)
                         worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
-                    except: pass
+                    except Exception: pass
                     
         return self.clean_data(df)
 
@@ -182,16 +166,15 @@ class CloudDataLoader:
         if self.db is None: return False
         try:
             worksheet = self.db.worksheet("Top_10_Leaderboard")
-        except gspread.exceptions.WorksheetNotFound:
+        except Exception:
             try:
                 worksheet = self.db.add_worksheet(title="Top_10_Leaderboard", rows="50", cols="10")
-            except: return False
+            except Exception: return False
         try:
-            time.sleep(1)
             worksheet.clear()
             worksheet.append_rows([df_leaderboard.columns.values.tolist()] + df_leaderboard.values.tolist())
             return True
-        except: return False
+        except Exception: return False
 
     def load_leaderboard(self):
         if self.db is None: return pd.DataFrame()
@@ -313,7 +296,8 @@ with st.sidebar:
         bot_token = st.text_input("🔑 Bot Token:", type="password")
         chat_id = st.text_input("💬 Chat ID:")
     
-    if st.button("🔔 Gửi Test", use_container_width=True):
+    # CẬP NHẬT CÚ PHÁP ĐỜI MỚI: width="stretch"
+    if st.button("🔔 Gửi Test", width="stretch"):
         if bot_token and chat_id:
             if send_telegram_alert(bot_token, chat_id, "✅ Hệ thống AI Quant đang hoạt động tốt."):
                 st.success("Đã gửi tin nhắn test!")
@@ -326,7 +310,8 @@ with st.sidebar:
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
-if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
+# CẬP NHẬT CÚ PHÁP ĐỜI MỚI: width="stretch"
+if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", width="stretch"):
     st.cache_data.clear()
     st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới để AI nạp lại bộ dữ liệu Vĩ mô!")
 
@@ -354,7 +339,7 @@ else: future_days = 21
 
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
-with st.spinner(f"Đang đọc dữ liệu từ Excel cho mã {symbol}..."):
+with st.spinner(f"Đang đọc dữ liệu cho mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -398,7 +383,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 CÔNG CỤ XÂY KHO"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -522,12 +507,13 @@ if result is not None:
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
         col_btn_t4_1, col_btn_t4_2, col_btn_t4_3 = st.columns(3)
+        # CẬP NHẬT CÚ PHÁP ĐỜI MỚI: width="stretch"
         with col_btn_t4_1:
-            btn_rank_sector = st.button("🔄 Xếp Hạng Nhóm Ngành", type="secondary", use_container_width=True)
+            btn_rank_sector = st.button("🔄 Xếp Hạng Nhóm Ngành", type="secondary", width="stretch")
         with col_btn_t4_2:
-            btn_view_top10 = st.button("⚡ Xem Bảng Phong Thần (0.1s)", type="primary", use_container_width=True)
+            btn_view_top10 = st.button("⚡ Xem Bảng Phong Thần (0.1s)", type="primary", width="stretch")
         with col_btn_t4_3:
-            btn_update_top10 = st.button("⚙️ Cập nhật Bảng (Quét 50 mã)", type="secondary", use_container_width=True)
+            btn_update_top10 = st.button("⚙️ Cập nhật Bảng (Quét 50 mã)", type="secondary", width="stretch")
 
         if btn_rank_sector:
             with st.spinner("Đang chạy Backtest nâng cao từng mã trong ngành..."):
@@ -583,13 +569,18 @@ if result is not None:
                 else:
                     st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
 
+        # MỎ NEO CHỐNG SẬP DÀNH RIÊNG CHO NÚT "CẬP NHẬT 50 MÃ"
         if btn_update_top10:
+            status_text = st.empty() # Khởi tạo một dòng thông báo nhấp nháy liên tục
             with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
                 all_top10_results = []
                 all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
                 bt_progress = st.progress(0)
                 
                 for idx, sym in enumerate(all_tickers_list):
+                    # Báo cáo ra màn hình để báo cho Streamlit biết "App vẫn đang sống, đừng rút điện!"
+                    status_text.markdown(f"⏳ **AI đang cày cuốc mã: {sym} ({idx+1}/50)...**")
+                    
                     res_bt = analyze_symbol(sym, future_days)
                     if not res_bt: continue
                     
@@ -618,6 +609,7 @@ if result is not None:
                     bt_progress.progress((idx + 1) / len(all_tickers_list))
                 
                 bt_progress.empty()
+                status_text.empty() # Xóa dòng chữ đang nhấp nháy đi khi chạy xong
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
@@ -658,7 +650,8 @@ if result is not None:
         st.subheader("🛠️ CÔNG CỤ XÂY KHO DỮ LIỆU (Dành cho lần chạy đầu tiên)")
         st.warning("⚠️ Nếu Google Sheet của thầy chưa hiện ĐỦ 50 MÃ, hãy dùng nút bấm dưới đây. Nó sẽ chạy cực kỳ chậm rãi (nghỉ 2.5 giây mỗi mã) để vượt qua bộ đếm an ninh của Google mà không bị Streamlit ngắt kết nối.")
         
-        if st.button("🏗️ ÉP ROBOT XÂY ĐỦ 50 MÃ (Chạy chậm & Chống Sập)", type="primary"):
+        # CẬP NHẬT CÚ PHÁP ĐỜI MỚI
+        if st.button("🏗️ ÉP ROBOT XÂY ĐỦ 50 MÃ (Chạy chậm & Chống Sập)", type="primary", width="stretch"):
             all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
             prog_bar = st.progress(0)
             status_text = st.empty()
