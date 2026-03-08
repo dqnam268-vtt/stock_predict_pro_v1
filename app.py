@@ -4,7 +4,6 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from xgboost import XGBRegressor 
-import yfinance as yf
 from datetime import datetime, timedelta
 import sys
 import os
@@ -43,7 +42,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ TÍNH NĂNG LƯU BẢNG PHONG THẦN)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (DÙNG VNSTOCK + MÀNG LỌC TINH KHIẾT)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -58,49 +57,91 @@ class CloudDataLoader:
         except Exception as e:
             st.error(f"🚨 LỖI API GOOGLE: {str(e)}")
 
-    def download_yf(self, yf_symbol, start, end):
+    def download_vnstock(self, symbol, start, end):
+        from vnstock import Quote
+        
+        start_str = start.strftime('%Y-%m-%d')
+        end_str = end.strftime('%Y-%m-%d')
+        
         df = pd.DataFrame()
         for attempt in range(4):
             try:
-                ticker = yf.Ticker(yf_symbol)
-                df = ticker.history(start=start, end=end)
-                if not df.empty: break
-            except: time.sleep(3)
-        if df.empty: return pd.DataFrame()
-        df.reset_index(inplace=True)
+                # Lấy dữ liệu từ nguồn Vietcap (VCI) cực kỳ ổn định và chuẩn giá
+                quote = Quote(symbol=symbol, source='VCI')
+                df = quote.history(start=start_str, end=end_str, interval='1D')
+                if df is not None and not df.empty: 
+                    break
+            except Exception:
+                time.sleep(2)
+                
+        if df is None or df.empty: 
+            return pd.DataFrame()
+            
+        # Chuẩn hóa tên cột để AI đọc được
+        if 'time' in df.columns:
+            df.rename(columns={'time': 'date'}, inplace=True)
+            
         df.columns = [c.lower() for c in df.columns]
-        if 'date' in df.columns and df['date'].dt.tz is not None:
-            df['date'] = df['date'].dt.tz_localize(None)
+        
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            if df['date'].dt.tz is not None:
+                df['date'] = df['date'].dt.tz_localize(None)
+                
+        if set(['date', 'open', 'high', 'low', 'close', 'volume']).issubset(df.columns):
+            df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+            
+        return df
+
+    def clean_data(self, df):
+        if df is None or df.empty: return df
+        df = df.copy()
+        
+        # 1. Ép kiểu số chuẩn (Khử rắc rối dấu phẩy của Google Sheet VN)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str).str.replace(',', '.', regex=False).str.strip()
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 2. Tiêu diệt nến rác (Giá = 0 hoặc Giá > 2 triệu VNĐ)
+        invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
+        df.loc[invalid_rows, ['open', 'high', 'low', 'close', 'volume']] = np.nan
+        
+        # 3. Lấp đầy lỗ hổng bằng giá của ngày hôm trước
+        df.ffill(inplace=True)
+        df.dropna(inplace=True)
         return df
 
     def get_data(self, symbol, days=3650):
-        yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
+        vn_symbol = symbol.replace('.VN', '') # Đảm bảo mã thuần Việt Nam
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
-        if self.db is None: return self.download_yf(yf_symbol, start_date, end_date)
+        if self.db is None: 
+            return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
 
         worksheet = None
         df = pd.DataFrame()
 
         try:
-            worksheet = self.db.worksheet(symbol)
+            worksheet = self.db.worksheet(vn_symbol)
             data = worksheet.get_all_records()
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
         except gspread.exceptions.WorksheetNotFound:
             try:
                 time.sleep(1)
-                worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
+                worksheet = self.db.add_worksheet(title=vn_symbol, rows="4000", cols="6")
             except:
-                return self.download_yf(yf_symbol, start_date, end_date)
-        except Exception as e:
-            return self.download_yf(yf_symbol, start_date, end_date)
+                return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
+        except Exception:
+            return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
 
-        if worksheet is None: return self.download_yf(yf_symbol, start_date, end_date)
+        if worksheet is None: 
+            return self.clean_data(self.download_vnstock(vn_symbol, start_date, end_date))
 
         if df.empty:
-            df = self.download_yf(yf_symbol, start_date, end_date)
+            df = self.download_vnstock(vn_symbol, start_date, end_date)
             if not df.empty:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
@@ -113,7 +154,7 @@ class CloudDataLoader:
             last_date = df['date'].max()
             if end_date.date() > last_date.date() and end_date.weekday() < 5:
                 new_start = last_date + timedelta(days=1)
-                new_df = self.download_yf(yf_symbol, new_start, end_date)
+                new_df = self.download_vnstock(vn_symbol, new_start, end_date)
                 if not new_df.empty:
                     df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                     df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
@@ -122,9 +163,9 @@ class CloudDataLoader:
                         worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
                     except: pass
-        return df
+                    
+        return self.clean_data(df)
 
-    # --- TÍNH NĂNG MỚI: LƯU VÀ TẢI BẢNG PHONG THẦN ---
     def save_leaderboard(self, df_leaderboard):
         if self.db is None: return False
         try:
@@ -315,7 +356,10 @@ if result is not None:
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
-    mtf_trend = latest_row['mtf_trend_up'].values[0]
+    
+    mtf_trend = 1
+    if 'mtf_trend_up' in latest_row.columns:
+        mtf_trend = latest_row['mtf_trend_up'].values[0]
         
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
@@ -465,7 +509,6 @@ if result is not None:
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
-        # CHIA LÀM 3 NÚT QUYỀN LỰC
         col_btn_t4_1, col_btn_t4_2, col_btn_t4_3 = st.columns(3)
         with col_btn_t4_1:
             btn_rank_sector = st.button("🔄 Xếp Hạng Nhóm Ngành", type="secondary", use_container_width=True)
@@ -511,14 +554,12 @@ if result is not None:
                     "Win Rate": "{:.1%}", "Drawdown": "{:.1%}"
                 }).background_gradient(subset=["Lãi ròng AI", "Win Rate"], cmap="RdYlGn"), use_container_width=True)
 
-        # NÚT XEM TỐC ĐỘ ÁNH SÁNG
         if btn_view_top10:
             with st.spinner("Đang kéo dữ liệu từ Đám mây..."):
                 loader = CloudDataLoader()
                 df_top10 = loader.load_leaderboard()
                 if not df_top10.empty:
                     st.success("Tải Bảng Phong Thần thành công trong chớp mắt!")
-                    # Đảm bảo hiển thị đúng định dạng số
                     try:
                         for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Kelly Mua Mới"]:
                             if col in df_top10.columns: df_top10[col] = df_top10[col].astype(float)
@@ -530,7 +571,6 @@ if result is not None:
                 else:
                     st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
 
-        # NÚT ĐI CÀY VÀ LƯU CLOUD
         if btn_update_top10:
             with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
                 all_top10_results = []
@@ -570,7 +610,6 @@ if result is not None:
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
                     
-                    # LƯU KẾT QUẢ VÀO GOOGLE SHEET
                     loader = CloudDataLoader()
                     loader.save_leaderboard(df_top10)
                     
@@ -599,9 +638,9 @@ if result is not None:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
-        col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
+        col_ai2.metric("Nguồn cấp dữ liệu", "Vnstock (Cập nhật Real-time)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Tích hợp bộ lọc rác thông minh. Cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
         
         st.markdown("---")
         st.subheader("🛠️ CÔNG CỤ XÂY KHO DỮ LIỆU (Dành cho lần chạy đầu tiên)")
@@ -703,3 +742,6 @@ if auto_bot and bot_token and chat_id:
                 if auto_msg != st.session_state['last_alert']:
                     send_telegram_alert(bot_token, chat_id, auto_msg)
                     st.session_state['last_alert'] = auto_msg
+
+else: 
+    if not result: st.error("Không thể kết nối dữ liệu.")
