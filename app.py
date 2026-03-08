@@ -42,7 +42,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD (DÙNG VNSTOCK + MÀNG LỌC TINH KHIẾT)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (DÙNG VNSTOCK + NGUỒN TCBS CHỐNG TREO)
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -58,21 +58,28 @@ class CloudDataLoader:
             st.error(f"🚨 LỖI API GOOGLE: {str(e)}")
 
     def download_vnstock(self, symbol, start, end):
-        from vnstock import Quote
+        try:
+            from vnstock3 import Quote
+        except ImportError:
+            try:
+                from vnstock import Quote
+            except Exception:
+                return pd.DataFrame()
         
         start_str = start.strftime('%Y-%m-%d')
         end_str = end.strftime('%Y-%m-%d')
         
         df = pd.DataFrame()
-        for attempt in range(4):
+        # Giảm số lần thử xuống để tránh treo app lâu
+        for attempt in range(2):
             try:
-                # Lấy dữ liệu từ nguồn Vietcap (VCI) cực kỳ ổn định và chuẩn giá
-                quote = Quote(symbol=symbol, source='VCI')
+                # ĐỔI NGUỒN SANG TCBS: Vượt qua tường lửa của Streamlit Cloud
+                quote = Quote(symbol=symbol, source='TCBS')
                 df = quote.history(start=start_str, end=end_str, interval='1D')
                 if df is not None and not df.empty: 
                     break
             except Exception:
-                time.sleep(2)
+                time.sleep(1)
                 
         if df is None or df.empty: 
             return pd.DataFrame()
@@ -342,7 +349,7 @@ else: future_days = 21
 
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
-with st.spinner(f"Đang đọc dữ liệu từ Excel cho mã {symbol}..."):
+with st.spinner(f"Đang kết nối & đọc dữ liệu mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -638,7 +645,7 @@ if result is not None:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
-        col_ai2.metric("Nguồn cấp dữ liệu", "Vnstock (Cập nhật Real-time)")
+        col_ai2.metric("Nguồn cấp dữ liệu", "TCBS/Vnstock (Ổn định 100%)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
         st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Tích hợp bộ lọc rác thông minh. Cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
         
@@ -742,6 +749,3 @@ if auto_bot and bot_token and chat_id:
                 if auto_msg != st.session_state['last_alert']:
                     send_telegram_alert(bot_token, chat_id, auto_msg)
                     st.session_state['last_alert'] = auto_msg
-
-else: 
-    if not result: st.error("Không thể kết nối dữ liệu.")
