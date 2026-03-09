@@ -4,3 +4,6 @@ pandas
 plotly
 xgboost
 yfinance
+requests
+gspread
+oauth2client

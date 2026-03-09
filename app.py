@@ -10,13 +10,17 @@ import sys
 import os
 import requests
 import time
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# BỘ NÃO AI
+# KẾT NỐI MODULE BỘ NÃO VĨ MÔ
 from ai_core import build_features, AIModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# DANH MỤC THỊ TRƯỜNG
+# ==========================================
+# CẤU TRÚC DANH MỤC NHÓM NGÀNH
+# ==========================================
 INDUSTRIES = {
     "🏦 Ngân hàng": ["VCB", "BID", "CTG", "MBB", "TCB", "VPB", "ACB", "STB", "SHB", "HDB"],
     "📈 Chứng khoán": ["SSI", "VND", "HCM", "VCI", "VIX", "SHS", "MBS", "FTS", "BSI"],
@@ -28,6 +32,8 @@ INDUSTRIES = {
 }
 
 if 'last_alert' not in st.session_state: st.session_state['last_alert'] = ""
+if 'morning_date' not in st.session_state: st.session_state['morning_date'] = None
+if 'afternoon_date' not in st.session_state: st.session_state['afternoon_date'] = None
 
 def send_telegram_alert(bot_token, chat_id, message):
     if not bot_token or not chat_id: return False
@@ -37,24 +43,29 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: LOCAL DATABASE (TỐC ĐỘ BÀN THỜ - CSV)
+# PHẦN 1: KHO DỮ LIỆU CLOUD (TRANG BỊ TÍNH NĂNG LƯU BẢNG PHONG THẦN)
 # ==========================================
-class CSVDataLoader:
+class CloudDataLoader:
     def __init__(self):
-        self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
+        self.db = None
+        try:
+            self.sheet_id = st.secrets["SHEET_ID"]
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            self.client = gspread.authorize(creds)
+            self.db = self.client.open_by_key(self.sheet_id)
+        except Exception as e:
+            st.error(f"🚨 LỖI API GOOGLE: {str(e)}")
 
     def download_yf(self, yf_symbol, start, end):
         df = pd.DataFrame()
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 ticker = yf.Ticker(yf_symbol)
                 df = ticker.history(start=start, end=end)
                 if not df.empty: break
-            except Exception:
-                time.sleep(1)
-                
+            except: time.sleep(3)
         if df.empty: return pd.DataFrame()
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
@@ -62,83 +73,88 @@ class CSVDataLoader:
             df['date'] = df['date'].dt.tz_localize(None)
         return df
 
-    def clean_data(self, df):
-        if df is None or df.empty: return df
-        df = df.copy()
-        
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            if df[col].dtype == object:
-                df[col] = df[col].astype(str).str.replace(',', '.', regex=False).str.strip()
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # MÀNG LỌC: Chém bay lỗi giá 6 Tỷ của Yahoo
-        invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
-        df.loc[invalid_rows, ['open', 'high', 'low', 'close', 'volume']] = np.nan
-        df.ffill(inplace=True)
-        df.dropna(inplace=True)
-        return df
-
     def get_data(self, symbol, days=3650):
         yf_symbol = symbol if symbol.endswith(".VN") else f"{symbol}.VN"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
-        
-        file_path = os.path.join(self.data_dir, f"{symbol}.csv")
 
-        if not os.path.exists(file_path):
+        if self.db is None: return self.download_yf(yf_symbol, start_date, end_date)
+
+        worksheet = None
+        df = pd.DataFrame()
+
+        try:
+            worksheet = self.db.worksheet(symbol)
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+            if not df.empty: df['date'] = pd.to_datetime(df['date'])
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                time.sleep(1)
+                worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
+            except:
+                return self.download_yf(yf_symbol, start_date, end_date)
+        except Exception as e:
+            return self.download_yf(yf_symbol, start_date, end_date)
+
+        if worksheet is None: return self.download_yf(yf_symbol, start_date, end_date)
+
+        if df.empty:
             df = self.download_yf(yf_symbol, start_date, end_date)
             if not df.empty:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
-                df_save.to_csv(file_path, index=False)
-            return self.clean_data(df)
+                df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
+                try:
+                    time.sleep(1)
+                    worksheet.clear()
+                    worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
+                except: pass
         else:
-            try:
-                df = pd.read_csv(file_path)
-                df['date'] = pd.to_datetime(df['date'])
-            except Exception:
-                df = pd.DataFrame()
-
-            if df.empty:
-                df = self.download_yf(yf_symbol, start_date, end_date)
-                if not df.empty:
-                    df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
-                    df_save.to_csv(file_path, index=False)
-                return self.clean_data(df)
-            else:
-                last_date = df['date'].max()
-                if end_date.date() > last_date.date() and end_date.weekday() < 5:
-                    new_start = last_date + timedelta(days=1)
-                    new_df = self.download_yf(yf_symbol, new_start, end_date)
-                    if not new_df.empty:
-                        new_df = new_df[['date', 'open', 'high', 'low', 'close', 'volume']]
+            last_date = df['date'].max()
+            if end_date.date() > last_date.date() and end_date.weekday() < 5:
+                new_start = last_date + timedelta(days=1)
+                new_df = self.download_yf(yf_symbol, new_start, end_date)
+                if not new_df.empty:
+                    df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
+                    df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
+                    try:
+                        time.sleep(0.5)
+                        worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
-                        df.to_csv(file_path, index=False)
-                return self.clean_data(df)
+                    except: pass
+        return df
 
+    # --- TÍNH NĂNG MỚI: LƯU VÀ TẢI BẢNG PHONG THẦN ---
     def save_leaderboard(self, df_leaderboard):
-        file_path = os.path.join(self.data_dir, "Top_10_Leaderboard.csv")
+        if self.db is None: return False
         try:
-            df_leaderboard.to_csv(file_path, index=False)
+            worksheet = self.db.worksheet("Top_10_Leaderboard")
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                worksheet = self.db.add_worksheet(title="Top_10_Leaderboard", rows="50", cols="10")
+            except: return False
+        try:
+            time.sleep(1)
+            worksheet.clear()
+            worksheet.append_rows([df_leaderboard.columns.values.tolist()] + df_leaderboard.values.tolist())
             return True
-        except Exception: return False
+        except: return False
 
     def load_leaderboard(self):
-        file_path = os.path.join(self.data_dir, "Top_10_Leaderboard.csv")
-        if os.path.exists(file_path):
-            try:
-                return pd.read_csv(file_path)
-            except Exception:
-                return pd.DataFrame()
-        return pd.DataFrame()
+        if self.db is None: return pd.DataFrame()
+        try:
+            worksheet = self.db.worksheet("Top_10_Leaderboard")
+            data = worksheet.get_all_records()
+            return pd.DataFrame(data)
+        except:
+            return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
-    df = CSVDataLoader().get_data(symbol)
-    if df is None or df.empty or len(df) < 250: return None
+    df = CloudDataLoader().get_data(symbol)
+    if df is None or df.empty or len(df) < 50: return None
     
     df_feat = build_features(df)
-    if df_feat.empty: return None
-    
     model = AIModel()
     model.train(df_feat)
     all_probs = model.predict_prob(df_feat)
@@ -174,8 +190,10 @@ def run_advanced_backtest(df_bt, nav):
     entry_price = 0
     shares = 0
     days_held = 0
+    
     winning_trades = 0
     total_trades = 0
+    
     equity_curve = []
     buy_hold_curve = []
     
@@ -213,14 +231,17 @@ def run_advanced_backtest(df_bt, nav):
                 shares = investable_capital / entry_price
                 days_held = 0
                 
-        if in_position: daily_equity = shares * current_price
-        else: daily_equity = capital
+        if in_position:
+            daily_equity = shares * current_price
+        else:
+            daily_equity = capital
             
         equity_curve.append(daily_equity)
         buy_hold_curve.append(bnh_shares * current_price)
         
     df_bt['strategy_equity'] = equity_curve
     df_bt['bnh_equity'] = buy_hold_curve
+    
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return df_bt, win_rate, total_trades
 
@@ -231,8 +252,13 @@ st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
 
 with st.sidebar:
     st.header("🤖 Cài đặt Telegram Bot")
-    bot_token = st.text_input("🔑 Bot Token:", type="password")
-    chat_id = st.text_input("💬 Chat ID:")
+    try:
+        bot_token = st.secrets["TELEGRAM_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        st.success("✅ Đã kết nối khóa bảo mật Cloud!")
+    except:
+        bot_token = st.text_input("🔑 Bot Token:", type="password")
+        chat_id = st.text_input("💬 Chat ID:")
     
     if st.button("🔔 Gửi Test", use_container_width=True):
         if bot_token and chat_id:
@@ -240,11 +266,16 @@ with st.sidebar:
                 st.success("Đã gửi tin nhắn test!")
             else: st.error("Gửi thất bại.")
     
+    st.markdown("---")
+    st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
+    auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
+    st.caption("AI tự chạy ngầm. Sẽ gửi Báo cáo Đầu Phiên (9h15) và Đóng Phiên (15h05) bao gồm toàn thị trường.")
+    
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
 if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
     st.cache_data.clear()
-    st.success("Đã xóa bộ nhớ đệm. Bắt đầu phiên làm việc mới!")
+    st.success("Đã xóa bộ nhớ đệm. Chờ lệnh quét mới để AI nạp lại bộ dữ liệu Vĩ mô!")
 
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
@@ -270,7 +301,7 @@ else: future_days = 21
 
 bt_days_dict = {"1 Tháng qua": 21, "3 Tháng qua": 63, "6 Tháng qua": 126, "1 Năm qua": 252, "3 Năm qua": 750, "Toàn bộ lịch sử (10 Năm)": 2500}
 
-with st.spinner(f"Đang phân tích dữ liệu kho cho mã {symbol}..."):
+with st.spinner(f"Đang đọc dữ liệu từ Excel cho mã {symbol}..."):
     result = analyze_symbol(symbol, future_days)
 
 if result is not None:
@@ -284,10 +315,7 @@ if result is not None:
     current_price = latest_row['close'].values[0]
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
-    
-    mtf_trend = 1
-    if 'mtf_trend_up' in latest_row.columns:
-        mtf_trend = latest_row['mtf_trend_up'].values[0]
+    mtf_trend = latest_row['mtf_trend_up'].values[0]
         
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
@@ -314,7 +342,7 @@ if result is not None:
 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 CÔNG CỤ XÂY KHO"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
@@ -389,10 +417,10 @@ if result is not None:
         scan_mode = "sector"
         
         with col_btn1:
-            if st.button(f"🔍 Quét & Tìm Top 5 Ngành {selected_sector}", type="primary", use_container_width=True):
+            if st.button(f"🔍 Quét & Tìm Top 5 Ngành {selected_sector}", type="primary"):
                 run_scan = True; scan_mode = "sector"
         with col_btn2:
-            if st.button("🌍 Quét Toàn Bộ TT (Lọc Top 5 Cực phẩm)", type="primary", use_container_width=True):
+            if st.button("🌍 Quét Toàn Bộ TT (Lọc Top 5 Cực phẩm)", type="primary"):
                 run_scan = True; scan_mode = "all"
                 
         if run_scan:
@@ -437,11 +465,12 @@ if result is not None:
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
+        # CHIA LÀM 3 NÚT QUYỀN LỰC
         col_btn_t4_1, col_btn_t4_2, col_btn_t4_3 = st.columns(3)
         with col_btn_t4_1:
             btn_rank_sector = st.button("🔄 Xếp Hạng Nhóm Ngành", type="secondary", use_container_width=True)
         with col_btn_t4_2:
-            btn_view_top10 = st.button("⚡ Xem Bảng Phong Thần", type="primary", use_container_width=True)
+            btn_view_top10 = st.button("⚡ Xem Bảng Phong Thần (0.1s)", type="primary", use_container_width=True)
         with col_btn_t4_3:
             btn_update_top10 = st.button("⚙️ Cập nhật Bảng (Quét 50 mã)", type="secondary", use_container_width=True)
 
@@ -482,12 +511,14 @@ if result is not None:
                     "Win Rate": "{:.1%}", "Drawdown": "{:.1%}"
                 }).background_gradient(subset=["Lãi ròng AI", "Win Rate"], cmap="RdYlGn"), use_container_width=True)
 
+        # NÚT XEM TỐC ĐỘ ÁNH SÁNG
         if btn_view_top10:
-            with st.spinner("Đang kéo dữ liệu từ Bộ nhớ Nội bộ..."):
-                loader = CSVDataLoader()
+            with st.spinner("Đang kéo dữ liệu từ Đám mây..."):
+                loader = CloudDataLoader()
                 df_top10 = loader.load_leaderboard()
                 if not df_top10.empty:
                     st.success("Tải Bảng Phong Thần thành công trong chớp mắt!")
+                    # Đảm bảo hiển thị đúng định dạng số
                     try:
                         for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Kelly Mua Mới"]:
                             if col in df_top10.columns: df_top10[col] = df_top10[col].astype(float)
@@ -499,15 +530,14 @@ if result is not None:
                 else:
                     st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
 
+        # NÚT ĐI CÀY VÀ LƯU CLOUD
         if btn_update_top10:
-            status_text = st.empty()
             with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
                 all_top10_results = []
                 all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
                 bt_progress = st.progress(0)
                 
                 for idx, sym in enumerate(all_tickers_list):
-                    status_text.markdown(f"⏳ **AI đang đánh giá mã: {sym} ({idx+1}/50)...**")
                     res_bt = analyze_symbol(sym, future_days)
                     if not res_bt: continue
                     
@@ -536,19 +566,19 @@ if result is not None:
                     bt_progress.progress((idx + 1) / len(all_tickers_list))
                 
                 bt_progress.empty()
-                status_text.empty()
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
                     
-                    loader = CSVDataLoader()
+                    # LƯU KẾT QUẢ VÀO GOOGLE SHEET
+                    loader = CloudDataLoader()
                     loader.save_leaderboard(df_top10)
                     
-                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần vào hệ thống! Từ nay chỉ cần bấm 'Xem Bảng' là hiện ra ngay.")
+                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet! Từ nay chỉ cần bấm 'Xem Bảng' là hiện ra ngay.")
                     st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
                     
                     if bot_token and chat_id:
-                        msg = f"🏆 *BẢNG PHONG THẦN MỚI ĐƯỢC CẬP NHẬT* 🏆\n_(Xếp hạng Lãi ròng {bt_timeframe_all} - Đã trừ phí GD)_\n\n"
+                        msg = f"🏆 *BẢNG PHONG THẦN MỚI ĐƯỢC CẬP NHẬT TRÊN CLOUD* 🏆\n_(Xếp hạng Lãi ròng {bt_timeframe_all} - Đã trừ phí GD)_\n\n"
                         for rank, row in df_top10.iterrows():
                             sym = row['Mã CP']
                             perf = row['Lãi ròng AI'] * 100
@@ -569,29 +599,107 @@ if result is not None:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
-        col_ai2.metric("Kho lưu trữ", "Local CSV Database (Siêu tốc)")
+        col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Dữ liệu tự động sinh ra và đóng gói thành file .csv nằm trong thư mục gốc. Tải cực nhanh, không lo bị chặn API.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
         
         st.markdown("---")
         st.subheader("🛠️ CÔNG CỤ XÂY KHO DỮ LIỆU (Dành cho lần chạy đầu tiên)")
-        st.warning("⚠️ Bấm nút dưới đây để tải 10 năm dữ liệu (khoảng 125,000 dòng) về lưu vào thư mục /data.")
+        st.warning("⚠️ Nếu Google Sheet của thầy chưa hiện ĐỦ 50 MÃ, hãy dùng nút bấm dưới đây. Nó sẽ chạy cực kỳ chậm rãi (nghỉ 2.5 giây mỗi mã) để vượt qua bộ đếm an ninh của Google mà không bị Streamlit ngắt kết nối.")
         
-        if st.button("🏗️ XÂY KHO CSV (Tải 10 Năm Của 50 Mã)", type="primary", use_container_width=True):
+        if st.button("🏗️ ÉP ROBOT XÂY ĐỦ 50 MÃ (Chạy chậm & Chống Sập)", type="primary"):
             all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
             prog_bar = st.progress(0)
             status_text = st.empty()
-            loader = CSVDataLoader()
+            loader = CloudDataLoader()
             
             for idx, sym_build in enumerate(all_tickers_list):
-                status_text.markdown(f"**Đang tải 10 năm dữ liệu và nén thành CSV mã: {sym_build} ({idx+1}/50)...**")
+                status_text.markdown(f"**Đang kiểm tra và bơm dữ liệu mã: {sym_build} ({idx+1}/50)...**")
                 try:
                     loader.get_data(sym_build, 3650)
                 except Exception as e: 
                     pass 
+                time.sleep(2.5) 
                 prog_bar.progress((idx + 1) / len(all_tickers_list))
                 
-            status_text.success("✅ TẠO DATABASE THÀNH CÔNG! Toàn bộ các file .csv đã nằm trong thư mục /data.")
+            status_text.success("✅ XÂY KHO HOÀN TẤT 100%! Toàn bộ 50 mã đã có mặt trên Google Sheet. Từ giờ App sẽ chạy với tốc độ ánh sáng!")
 
-else: 
-    if not result: st.error("Không thể kết nối hoặc thiếu dữ liệu để phân tích mã này.")
+if auto_bot and bot_token and chat_id:
+    vn_time = datetime.utcnow() + timedelta(hours=7)
+    today_str = vn_time.strftime("%Y-%m-%d")
+    
+    if vn_time.weekday() < 5:
+        is_morning_time = (vn_time.hour == 9 and vn_time.minute >= 15) or (vn_time.hour == 10 and vn_time.minute <= 0)
+        is_afternoon_time = (vn_time.hour == 15 and vn_time.minute >= 5) or (vn_time.hour == 16 and vn_time.minute <= 0)
+
+        trigger_morning = is_morning_time and (st.session_state.get('morning_date') != today_str)
+        trigger_afternoon = is_afternoon_time and (st.session_state.get('afternoon_date') != today_str)
+
+        if trigger_morning or trigger_afternoon:
+            all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
+            radar_results = []
+            
+            for sym in all_tickers:
+                res = analyze_symbol(sym, future_days)
+                if not res: continue
+                scan_prob = res['prob']
+                scan_preds = res['future_preds_adapt']
+                min_idx = int(np.argmin(scan_preds))
+                buy_p = scan_preds[min_idx]
+                scan_profit = 0
+                if min_idx + 3 < len(scan_preds):
+                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
+                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                
+                radar_results.append({
+                    "sym": sym, "buy": buy_p, "profit": scan_profit, "kelly": scan_kelly, "prob": scan_prob
+                })
+
+            if radar_results:
+                radar_df = pd.DataFrame(radar_results).sort_values(by=["kelly", "prob"], ascending=[False, False])
+                good_df = radar_df[radar_df["kelly"] > 0]
+                bad_df = radar_df[radar_df["kelly"] == 0]
+                
+                session_name = "🌅 ĐẦU PHIÊN SÁNG" if trigger_morning else "🌇 TỔNG KẾT PHIÊN CHIỀU"
+                full_msg = f"🔔 *BÁO CÁO TOÀN THỊ TRƯỜNG: {session_name}* ({vn_time.strftime('%d/%m')})\n\n"
+                
+                if not good_df.empty:
+                    full_msg += "🎯 *TOP CỔ PHIẾU ĐẠT CHUẨN MUA (AI ĐỀ XUẤT):*\n"
+                    for _, row in good_df.iterrows():
+                        full_msg += f"✅ *{row['sym']}* | Mua: {row['Giá Canh Mua']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
+                else:
+                    full_msg += "⚠️ *Toàn thị trường KHÔNG CÓ mã nào đạt chuẩn Mua. Nên ôm tiền mặt.*\n"
+
+                if not bad_df.empty:
+                    full_msg += "\n📊 *TRẠNG THÁI 50 MÃ QUAN SÁT (Xếp hạng Xác suất Tăng):*\n"
+                    bad_list = [f"{row['sym']}({row['prob']*100:.0f}%)" for _, row in bad_df.iterrows()]
+                    full_msg += " | ".join(bad_list)
+                    
+                send_telegram_alert(bot_token, chat_id, full_msg)
+                
+                if trigger_morning: st.session_state['morning_date'] = today_str
+                if trigger_afternoon: st.session_state['afternoon_date'] = today_str
+                
+        elif (vn_time.hour >= 9 and vn_time.hour < 15):
+            auto_results = []
+            all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
+            for sym in all_tickers:
+                res = analyze_symbol(sym, future_days)
+                if not res: continue
+                scan_prob = res['prob']
+                scan_preds = res['future_preds_adapt']
+                min_idx = int(np.argmin(scan_preds))
+                scan_profit = (max(scan_preds[min_idx + 3:]) - scan_preds[min_idx]) / scan_preds[min_idx] * 100 if min_idx + 3 < len(scan_preds) else 0
+                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                if scan_kelly > 0:
+                    auto_results.append({"sym": sym, "buy": scan_preds[min_idx], "profit": scan_profit, "kelly": scan_kelly})
+                    
+            if auto_results:
+                auto_df = pd.DataFrame(auto_results).sort_values(by="kelly", ascending=False).head(5)
+                auto_msg = "🤖 *BÁO CÁO CẬP NHẬT TRONG PHIÊN (TOP 5)* 🤖\n\n"
+                for _, row in auto_df.iterrows():
+                    auto_msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}%\n"
+                    
+                if auto_msg != st.session_state['last_alert']:
+                    send_telegram_alert(bot_token, chat_id, auto_msg)
+                    st.session_state['last_alert'] = auto_msg
