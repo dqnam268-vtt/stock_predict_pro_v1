@@ -1,11 +1,13 @@
-cd C:\Users\Admin\stock_predict_pro
+c
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install numpy --only-binary :all:
 python -m pip install --only-binary :all: numpy pandas
 set PYTHONUTF8=1
 python -m pip install -r requirements.txt
 
-
+pip install streamlit numpy pandas plotly xgboost yfinance
+streamlit run app.py
+http://localhost:8501
 
 
 python run_backtest_2025.py
