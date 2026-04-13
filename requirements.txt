@@ -7,3 +7,4 @@ yfinance
 requests
 gspread
 oauth2client
+scikit-learn
