@@ -44,7 +44,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD 
+# PHẦN 1: KHO DỮ LIỆU CLOUD CHO UI 
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -66,12 +66,18 @@ class CloudDataLoader:
                 ticker = yf.Ticker(yf_symbol)
                 df = ticker.history(start=start, end=end)
                 if not df.empty: break
-            except: time.sleep(3)
+            except: time.sleep(1)
         if df.empty: return pd.DataFrame()
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
         if 'date' in df.columns and df['date'].dt.tz is not None:
             df['date'] = df['date'].dt.tz_localize(None)
+            
+        # Dọn rác cơ bản
+        invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
+        df.loc[invalid_rows, 'close'] = np.nan
+        df['close'].ffill(inplace=True)
+        df.dropna(subset=['close'], inplace=True)
         return df
 
     def get_data(self, symbol, days=3650):
@@ -89,16 +95,8 @@ class CloudDataLoader:
             data = worksheet.get_all_records()
             df = pd.DataFrame(data)
             if not df.empty: df['date'] = pd.to_datetime(df['date'])
-        except gspread.exceptions.WorksheetNotFound:
-            try:
-                time.sleep(1)
-                worksheet = self.db.add_worksheet(title=symbol, rows="4000", cols="6")
-            except:
-                return self.download_yf(yf_symbol, start_date, end_date)
-        except Exception as e:
+        except Exception:
             return self.download_yf(yf_symbol, start_date, end_date)
-
-        if worksheet is None: return self.download_yf(yf_symbol, start_date, end_date)
 
         if df.empty:
             df = self.download_yf(yf_symbol, start_date, end_date)
@@ -106,7 +104,6 @@ class CloudDataLoader:
                 df_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                 df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                 try:
-                    time.sleep(1)
                     worksheet.clear()
                     worksheet.append_rows([df_save.columns.values.tolist()] + df_save.values.tolist())
                 except: pass
@@ -119,7 +116,6 @@ class CloudDataLoader:
                     df_save = new_df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
                     df_save['date'] = df_save['date'].dt.strftime('%Y-%m-%d')
                     try:
-                        time.sleep(0.5)
                         worksheet.append_rows(df_save.values.tolist())
                         df = pd.concat([df, new_df]).drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
                     except: pass
@@ -129,12 +125,10 @@ class CloudDataLoader:
         if self.db is None: return False
         try:
             worksheet = self.db.worksheet("Top_10_Leaderboard")
-        except gspread.exceptions.WorksheetNotFound:
-            try:
-                worksheet = self.db.add_worksheet(title="Top_10_Leaderboard", rows="50", cols="10")
+        except:
+            try: worksheet = self.db.add_worksheet(title="Top_10_Leaderboard", rows="50", cols="10")
             except: return False
         try:
-            time.sleep(1)
             worksheet.clear()
             worksheet.append_rows([df_leaderboard.columns.values.tolist()] + df_leaderboard.values.tolist())
             return True
@@ -146,8 +140,7 @@ class CloudDataLoader:
             worksheet = self.db.worksheet("Top_10_Leaderboard")
             data = worksheet.get_all_records()
             return pd.DataFrame(data)
-        except:
-            return pd.DataFrame()
+        except: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyze_symbol(symbol, future_days):
@@ -170,20 +163,26 @@ def analyze_symbol(symbol, future_days):
     reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
+    # BẢN VÁ: GÔNG CÙM CHỐNG NỔ GIÁ LŨY THỪA TRÊN BIỂU ĐỒ
+    current_price_baseline = df['close'].iloc[-1]
+    max_bound = current_price_baseline * 1.15 # Chỉ cho phép dao động tối đa 15%
+    min_bound = current_price_baseline * 0.85
+    
     future_preds_adapt = []
     current_lags_adapt = df['close'].iloc[-5:].values.tolist()
     for _ in range(future_days):
         pred = reg_model_adapt.predict(np.array([current_lags_adapt]))[0]
-        future_preds_adapt.append(float(pred))
+        pred = float(np.clip(pred, min_bound, max_bound)) # Ép giá về vùng thực tế
+        future_preds_adapt.append(pred)
         current_lags_adapt.pop(0)
-        current_lags_adapt.append(float(pred))
+        current_lags_adapt.append(pred)
         
     return {'df': df, 'df_feat': df_feat, 'prob': prob, 'all_probs': all_probs, 'future_preds_adapt': future_preds_adapt, 'features_count': len(model.features), 'data_rows': len(df_feat)}
 
 def run_advanced_backtest(df_bt, nav):
     fee = 0.0015         
-    stop_loss = -0.07    
-    take_profit = 0.15   
+    stop_loss = -0.04    
+    take_profit = 0.06   
     capital = nav
     in_position = False
     entry_price = 0
@@ -236,44 +235,77 @@ def run_advanced_backtest(df_bt, nav):
     return df_bt, win_rate, total_trades
 
 # ==========================================
-# BỘ NÃO PHỤ: MÀNG LỌC TIẾN ĐỘ CHỐNG SẬP (BẢN VÁ LỖI MỚI)
+# BỘ NÃO TELEGRAM ĐỘC LẬP: LƯỚT NHANH QUYẾT ĐOÁN, BỎ QUA GOOGLE SHEET
 # ==========================================
-def get_top_10_market_report(horizon_days=5, status_element=None):
+def get_top_10_market_report(status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
     radar_results = []
     
     for i, sym in enumerate(all_tickers):
-        # Mỏ neo tiến độ: Ép Streamlit Cloud không được ngắt kết nối
         if status_element:
-            status_element.info(f"⏳ **AI đang cày cuốc mã: {sym} ({i+1}/50)...**")
+            status_element.info(f"⏳ **Bỏ qua GG Sheet, đang hút dữ liệu Live cho: {sym} ({i+1}/50)...**")
             
-        res = analyze_symbol(sym, horizon_days)
-        if not res: continue
-        scan_prob = res['prob']
-        scan_preds = res['future_preds_adapt']
-        min_idx = int(np.argmin(scan_preds))
-        buy_p = scan_preds[min_idx]
-        scan_profit = 0
-        if min_idx + 3 < len(scan_preds):
-            scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
-        scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
-
-        if scan_kelly > 0:
-            radar_results.append({
-                "sym": sym, "buy": buy_p, "profit": scan_profit, "kelly": scan_kelly, "prob": scan_prob
-            })
+        try:
+            # 1. HÚT DATA TRỰC TIẾP TRÊN RAM (Tránh bị Google Sheet khóa mỏm)
+            yf_symbol = sym if sym.endswith(".VN") else f"{sym}.VN"
+            df = yf.Ticker(yf_symbol).history(period="1y")
+            if df.empty: continue
+            df.reset_index(inplace=True)
+            df.columns = [c.lower() for c in df.columns]
+            if 'date' in df.columns and df['date'].dt.tz is not None:
+                df['date'] = df['date'].dt.tz_localize(None)
+                
+            invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
+            df.loc[invalid_rows, 'close'] = np.nan
+            df['close'].ffill(inplace=True)
+            df.dropna(subset=['close'], inplace=True)
+            
+            if len(df) < 50: continue
+            
+            # 2. XỬ LÝ QUA NÃO AI
+            df_feat = build_features(df)
+            if df_feat is None or df_feat.empty: continue
+            
+            model = AIModel()
+            model.train(df_feat)
+            all_probs = model.predict_prob(df_feat)
+            prob = all_probs[-1]
+            
+            current_price = df_feat['close'].iloc[-1]
+            
+            # 3. QUẢN TRỊ RỦI RO THỰC CHIẾN (Chống nổ giá)
+            profit_target = 0.06 # Tỷ lệ chốt lời kỳ vọng +6%
+            loss_limit = 0.04    # Tỷ lệ cắt lỗ -4%
+            win_loss_ratio = profit_target / loss_limit
+            
+            # Công thức Kelly tiêu chuẩn
+            kelly = prob - ((1 - prob) / win_loss_ratio)
+            
+            if kelly > 0 and prob >= 0.55: # Chỉ ghi nhận mã ĐẠT CHUẨN
+                radar_results.append({
+                    "sym": sym, 
+                    "buy": current_price, 
+                    "profit": profit_target * 100, 
+                    "kelly": kelly * 100, 
+                    "prob": prob
+                })
+        except Exception:
+            continue # Nếu lỗi mạng, bỏ qua không làm sập tiến trình
             
     if status_element:
-        status_element.empty() # Quét xong thì xóa dòng báo cáo đi
+        status_element.empty()
 
+    # 4. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10
     if not radar_results:
-        return "⚠️ *Thị trường XẤU. KHÔNG CÓ mã nào đạt chuẩn Mua. Khuyến nghị Ôm Tiền Mặt!*\n"
+        return "⚠️ *ĐÁNH GIÁ THỊ TRƯỜNG:* Hiện tại **KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA**. Lực bán đang áp đảo, khuyến nghị ÔM TIỀN MẶT đứng ngoài quan sát!\n"
 
-    radar_df = pd.DataFrame(radar_results).sort_values(by=["kelly", "prob"], ascending=[False, False]).head(10)
+    radar_df = pd.DataFrame(radar_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
 
-    msg = "🎯 *TOP 10 CỔ PHIẾU ĐẠT CHUẨN MUA MẠNH NHẤT:*\n"
+    msg = "🎯 *NHẬN XÉT:* CÁC MÃ DƯỚI ĐÂY ĐÃ **ĐẠT CHUẨN MUA MẠNH MẼ** (Lọc ra TOP 10 tốt nhất Toàn Thị Trường):\n\n"
     for rank, row in radar_df.iterrows():
-        msg += f"✅ *{row['sym']}* | Mua: {row['buy']:,.0f}đ | Kỳ vọng: +{row['profit']:.2f}% | Kelly: {row['kelly']:.1f}%\n"
+        msg += f"✅ *{row['sym']}* | Vào giá: {row['buy']:,.0f}đ | Tỷ lệ Thắng: {row['prob']*100:.1f}% | Phân bổ Vốn: {row['kelly']:.1f}%\n"
+        
+    msg += "\n💡 *Ghi chú chiến lược:* Giá vào là mức giá hiện tại. Lập sẵn lệnh chờ Chốt lời +6%, Cắt lỗ dứt khoát tại -4%."
     return msg
 
 # ==========================================
@@ -298,14 +330,11 @@ with st.sidebar:
     
     st.write("")
     
-    # NÚT BÁO CỨNG (ĐÃ GẮN TIẾN ĐỘ CHỐNG SẬP)
+    # NÚT BÁO CỨNG (ĐÃ SỬA CHUẨN)
     if st.button("🚀 GỬI BÁO CÁO TOP 10 NGAY", use_container_width=True, type="primary"):
         if bot_token and chat_id:
-            # Tạo 1 dòng trống ngay dưới nút bấm để in tiến độ
             status_text = st.empty() 
-            
-            # Quăng cái khung này vào trong hàm để nó tự nháy chữ báo cáo
-            report_msg = get_top_10_market_report(5, status_text)
+            report_msg = get_top_10_market_report(status_text)
             
             status_text.warning("✅ *Đang tổng hợp tín hiệu và bắn qua Telegram...*")
             full_message = f"⚡ *BÁO CÁO NHANH THEO YÊU CẦU (THỦ CÔNG)* ⚡\n\n{report_msg}"
@@ -369,26 +398,14 @@ if result is not None:
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
 
-    future_min_idx = int(np.argmin(future_preds_adapt))
-    buy_date = future_dates[future_min_idx]
-    buy_price = future_preds_adapt[future_min_idx]
+    # Đưa giá trị UI về quy chuẩn chung
+    buy_date = future_dates[0]
+    buy_price = current_price
     
-    can_sell_T3 = False
-    profit_pct = 0
-    if future_min_idx + 3 < len(future_preds_adapt):
-        valid_sell_slice = future_preds_adapt[future_min_idx + 3:]
-        offset_idx = int(np.argmax(valid_sell_slice))
-        future_max_idx = future_min_idx + 3 + offset_idx
-        sell_date = future_dates[future_max_idx]
-        sell_price = future_preds_adapt[future_max_idx]
-        profit_pct = (sell_price - buy_price) / buy_price * 100
-        can_sell_T3 = True
-
-    kelly_pct = 0
-    if can_sell_T3 and profit_pct > 0:
-        b = profit_pct / 5.0
-        if b > 0: kelly_pct = max(0, (prob - ((1 - prob) / b)) / 2) * 100 
-
+    profit_expectation = 0.06
+    loss_expectation = 0.04
+    win_loss_ratio = profit_expectation / loss_expectation
+    kelly_pct = max(0, (prob - ((1 - prob) / win_loss_ratio))) * 100 
     shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
@@ -397,7 +414,7 @@ if result is not None:
         col1, col2 = st.columns([1, 2.8])
         with col1:
             st.info("💡 Tín hiệu AI & Dòng tiền")
-            st.metric("Xác suất tăng (3 phiên tới)", f"{prob*100:.1f}%")
+            st.metric("Xác suất tăng (Đạt chuẩn > 55%)", f"{prob*100:.1f}%")
             st.write("---")
             st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
             st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
@@ -417,12 +434,8 @@ if result is not None:
             else:
                 fig.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['close'], mode='lines', name='Giá thực tế', line=dict(color='#1f77b4', width=2)), row=1, col=1)
             
-            fig.add_trace(go.Scatter(x=future_dates, y=future_preds_adapt, mode='lines', name='AI Dự báo', line=dict(color='magenta', width=2.5, dash='dash')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=future_dates, y=future_preds_adapt, mode='lines', name='AI Dự đoán Cực trị', line=dict(color='magenta', width=2.5, dash='dash')), row=1, col=1)
             fig.add_trace(go.Scatter(x=[buy_date], y=[buy_price], mode='markers', name='MUA', marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))), row=1, col=1)
-            
-            if can_sell_T3:
-                fig.add_trace(go.Scatter(x=[sell_date], y=[sell_price], mode='markers', name='BÁN', marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))), row=1, col=1)
-                fig.add_trace(go.Scatter(x=[buy_date, sell_date], y=[buy_price, sell_price], mode='lines', name='Kỳ vọng', line=dict(color='green', width=1.5, dash='dot')), row=1, col=1)
 
             volume_colors = ['#00CC00' if row['close'] >= row['open'] else '#FF0000' for _, row in df_plot.iterrows()]
             fig.add_trace(go.Bar(x=df_plot['date'], y=df_plot['volume'], marker_color=volume_colors, name='Volume'), row=2, col=1)
@@ -431,7 +444,10 @@ if result is not None:
             fig.update_layout(xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-        st.success(f"**Bản ghi nhớ:** {symbol} - Khuyến nghị đi vốn: {kelly_pct:.1f}% ({shares_to_buy:,} CP)")
+        if kelly_pct > 0 and prob >= 0.55:
+            st.success(f"**🟢 CHUẨN MUA MẠNH:** {symbol} - Khuyến nghị dùng {kelly_pct:.1f}% Vốn ({shares_to_buy:,} Cổ phiếu). Lãi kỳ vọng +6% / Cắt lỗ -4%.")
+        else:
+            st.warning(f"**⚠️ CHƯA ĐẠT CHUẨN MUA:** {symbol} - Xác suất chưa đủ 55% hoặc điểm mù rủi ro. Nên đứng ngoài quan sát.")
 
     with tab2:
         st.subheader(f"Mô phỏng Đánh tiền Thật (Đã trừ Phí 0.15% & Thuế) - Mã {symbol}")
@@ -460,7 +476,7 @@ if result is not None:
         col_m3.metric("Tần suất Giao dịch", f"{total_trades_single} Lệnh")
 
     with tab3:
-        st.subheader("🏆 Radar Tín Hiệu & Báo Cáo Telegram (Lọc Top 5)")
+        st.subheader("🏆 Radar Tín Hiệu & Báo Cáo Telegram (Lọc Top 5 Giao diện)")
         col_btn1, col_btn2 = st.columns(2)
         run_scan = False
         scan_mode = "sector"
@@ -475,39 +491,26 @@ if result is not None:
         if run_scan:
             target_tickers = current_tickers if scan_mode == "sector" else [tic for sublist in INDUSTRIES.values() for tic in sublist]
             progress_bar = st.progress(0)
-            radar_results = []
+            radar_results_ui = []
             
             for i, sym in enumerate(target_tickers):
                 res = analyze_symbol(sym, future_days)
                 if not res: continue
                 scan_prob = res['prob']
-                scan_preds = res['future_preds_adapt']
-                min_idx = int(np.argmin(scan_preds))
-                buy_p = scan_preds[min_idx]
-                scan_profit = 0
-                if min_idx + 3 < len(scan_preds):
-                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100
-                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                cur_price = res['df_feat']['close'].iloc[-1]
+                
+                scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(0.06/0.04)))) * 100
                         
-                radar_results.append({"Mã CP": sym, "Xác suất Tăng": scan_prob, "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, "Kỳ vọng T+3": scan_profit / 100, "Giá Canh Mua": buy_p})
+                if scan_kelly > 0 and scan_prob >= 0.55:
+                    radar_results_ui.append({"Mã CP": sym, "Xác suất Tăng": scan_prob, "Tỷ trọng Vốn (Kelly)": scan_kelly / 100, "Giá Canh Mua": cur_price})
                 progress_bar.progress((i + 1) / len(target_tickers))
                 
             progress_bar.empty()
-            if radar_results:
-                radar_df = pd.DataFrame(radar_results).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
-                st.dataframe(radar_df.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Kỳ vọng T+3": "{:+.2%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
-                
-                if bot_token and chat_id:
-                    buyable_df = radar_df[radar_df["Tỷ trọng Vốn (Kelly)"] > 0]
-                    top_5_df = buyable_df.head(5)
-                    final_msg = f"🏆 *TOP 5 MÃ TỐT NHẤT ({'NGÀNH' if scan_mode == 'sector' else 'TOÀN TT'})* 🏆\n\n"
-                    if not top_5_df.empty:
-                        for _, row in top_5_df.iterrows():
-                            final_msg += f"✅ *{row['Mã CP']}* | Mua: {row['Giá Canh Mua']:,.0f}đ | Kỳ vọng: +{row['Kỳ vọng T+3']*100:.2f}% | Kelly: {row['Tỷ trọng Vốn (Kelly)']*100:.1f}%\n"
-                    else:
-                        final_msg += "⚠️ *Toàn bộ các mã quét được đều Xấu. Nên đứng ngoài.*\n"
-                    send_telegram_alert(bot_token, chat_id, final_msg)
-                    st.toast("Đã lọc và gửi báo cáo Top 5 qua Telegram!", icon="✈️")
+            if radar_results_ui:
+                radar_df_ui = pd.DataFrame(radar_results_ui).sort_values(by="Tỷ trọng Vốn (Kelly)", ascending=False).reset_index(drop=True)
+                st.dataframe(radar_df_ui.style.format({"Xác suất Tăng": "{:.1%}", "Tỷ trọng Vốn (Kelly)": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ"}).background_gradient(subset=["Xác suất Tăng", "Tỷ trọng Vốn (Kelly)"], cmap="Greens"), use_container_width=True, height=400)
+            else:
+                st.warning("⚠️ Không có mã nào đạt chuẩn Mua trong nhóm này!")
 
     with tab4:
         st.subheader(f"📈 Bảng Xếp Hạng Kỷ Luật Thực Chiến: Nhóm {selected_sector}")
@@ -595,17 +598,14 @@ if result is not None:
                     profit_pct = (bt_df['strategy_equity'].iloc[-1] / nav - 1) * 100
                     
                     scan_prob = res_bt['prob']
-                    scan_preds = res_bt['future_preds_adapt']
-                    min_idx = int(np.argmin(scan_preds))
-                    buy_p = scan_preds[min_idx]
-                    scan_profit = (max(scan_preds[min_idx + 3:]) - buy_p) / buy_p * 100 if min_idx + 3 < len(scan_preds) else 0
-                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(scan_profit/5.0))) / 2) * 100 if (scan_profit > 0 and (scan_profit / 5.0) > 0) else 0
+                    cur_price = res_bt['df_feat']['close'].iloc[-1]
+                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(0.06/0.04)))) * 100
 
                     all_top10_results.append({
                         "Mã CP": sym, 
                         "Lãi ròng AI": profit_pct / 100, 
                         "Tỷ lệ Thắng": win_rate_pct / 100,
-                        "Giá Canh Mua": buy_p,
+                        "Giá Canh Mua": cur_price,
                         "Kelly Mua Mới": scan_kelly / 100
                     })
                     bt_progress.progress((idx + 1) / len(all_tickers_list))
@@ -614,38 +614,19 @@ if result is not None:
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
-                    
                     loader = CloudDataLoader()
                     loader.save_leaderboard(df_top10)
                     
                     st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet! Từ nay chỉ cần bấm 'Xem Bảng' là hiện ra ngay.")
                     st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
                     
-                    if bot_token and chat_id:
-                        msg = f"🏆 *BẢNG PHONG THẦN MỚI ĐƯỢC CẬP NHẬT TRÊN CLOUD* 🏆\n_(Xếp hạng Lãi ròng {bt_timeframe_all} - Đã trừ phí GD)_\n\n"
-                        for rank, row in df_top10.iterrows():
-                            sym = row['Mã CP']
-                            perf = row['Lãi ròng AI'] * 100
-                            win = row['Tỷ lệ Thắng'] * 100
-                            buy = row['Giá Canh Mua']
-                            kel = row['Kelly Mua Mới'] * 100
-                            
-                            msg += f"*{rank + 1}. {sym}* | Lãi ròng: {perf:+.1f}% | Win: {win:.0f}%\n"
-                            if kel > 0:
-                                msg += f"👉 *🟢 CANH MUA {buy:,.0f}đ* (Vào {kel:.1f}% vốn)\n\n"
-                            else:
-                                msg += f"👉 *➖ Đứng ngoài quan sát*\n\n"
-                            
-                        send_telegram_alert(bot_token, chat_id, msg)
-                        st.toast("Đã bắn Báo cáo Top 10 qua Telegram!", icon="✈️")
-
     with tab5:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
         col_ai1, col_ai2, col_ai3 = st.columns(3)
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
         col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Cập nhật kiến thức siêu tốc mà không xóa bài cũ.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã gỡ bỏ mô hình dự báo sinh tỷ lệ nổ lũy thừa.")
 
 # ==========================================
 # BỘ NÃO CHẠY NGẦM (AUTO-BOT: 9h05, 13h05, 15h05)
@@ -668,7 +649,7 @@ if auto_bot and bot_token and chat_id:
             elif trigger_13: session_name = "CHIỀU (13h05)"
             else: session_name = "TỔNG KẾT (15h05)"
             
-            report_msg = get_top_10_market_report(5) # Auto Bot chạy ngầm, không cần in tiến độ ra màn hình
+            report_msg = get_top_10_market_report() 
             full_msg = f"🔔 *BÁO CÁO ĐỊNH KỲ: PHIÊN {session_name}* ({vn_time.strftime('%d/%m')})\n\n{report_msg}"
             
             send_telegram_alert(bot_token, chat_id, full_msg)
