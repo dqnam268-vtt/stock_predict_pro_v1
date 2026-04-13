@@ -235,11 +235,18 @@ def run_advanced_backtest(df_bt, nav):
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return df_bt, win_rate, total_trades
 
-# BỘ NÃO PHỤ: HÀM QUÉT TOÀN BỘ 50 MÃ VÀ TRÍCH XUẤT TOP 10 (Dành cho Telegram)
-def get_top_10_market_report(horizon_days=5):
+# ==========================================
+# BỘ NÃO PHỤ: MÀNG LỌC TIẾN ĐỘ CHỐNG SẬP (BẢN VÁ LỖI MỚI)
+# ==========================================
+def get_top_10_market_report(horizon_days=5, status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
     radar_results = []
-    for sym in all_tickers:
+    
+    for i, sym in enumerate(all_tickers):
+        # Mỏ neo tiến độ: Ép Streamlit Cloud không được ngắt kết nối
+        if status_element:
+            status_element.info(f"⏳ **AI đang cày cuốc mã: {sym} ({i+1}/50)...**")
+            
         res = analyze_symbol(sym, horizon_days)
         if not res: continue
         scan_prob = res['prob']
@@ -255,11 +262,13 @@ def get_top_10_market_report(horizon_days=5):
             radar_results.append({
                 "sym": sym, "buy": buy_p, "profit": scan_profit, "kelly": scan_kelly, "prob": scan_prob
             })
+            
+    if status_element:
+        status_element.empty() # Quét xong thì xóa dòng báo cáo đi
 
     if not radar_results:
         return "⚠️ *Thị trường XẤU. KHÔNG CÓ mã nào đạt chuẩn Mua. Khuyến nghị Ôm Tiền Mặt!*\n"
 
-    # Lấy đúng Top 10 mã ngon nhất
     radar_df = pd.DataFrame(radar_results).sort_values(by=["kelly", "prob"], ascending=[False, False]).head(10)
 
     msg = "🎯 *TOP 10 CỔ PHIẾU ĐẠT CHUẨN MUA MẠNH NHẤT:*\n"
@@ -288,18 +297,23 @@ with st.sidebar:
     st.caption("AI tự chạy ngầm. Sẽ tự động gửi Báo cáo Top 10 toàn TT vào đúng các mốc: 9h05, 13h05 và 15h05.")
     
     st.write("")
-    # ==========================================
-    # NÚT BÁO CỨNG (MANUAL TRIGGER) THẦY YÊU CẦU
-    # ==========================================
+    
+    # NÚT BÁO CỨNG (ĐÃ GẮN TIẾN ĐỘ CHỐNG SẬP)
     if st.button("🚀 GỬI BÁO CÁO TOP 10 NGAY", use_container_width=True, type="primary"):
         if bot_token and chat_id:
-            with st.spinner("Đang soi 50 mã để lọc ra Top 10... (Mất khoảng vài giây)"):
-                report_msg = get_top_10_market_report(5)
-                full_message = f"⚡ *BÁO CÁO NHANH THEO YÊU CẦU (THỦ CÔNG)* ⚡\n\n{report_msg}"
-                if send_telegram_alert(bot_token, chat_id, full_message):
-                    st.success("Đã bắn báo cáo Top 10 qua Telegram thành công!")
-                else:
-                    st.error("Gửi thất bại. Hãy kiểm tra lại Bot Token hoặc Chat ID.")
+            # Tạo 1 dòng trống ngay dưới nút bấm để in tiến độ
+            status_text = st.empty() 
+            
+            # Quăng cái khung này vào trong hàm để nó tự nháy chữ báo cáo
+            report_msg = get_top_10_market_report(5, status_text)
+            
+            status_text.warning("✅ *Đang tổng hợp tín hiệu và bắn qua Telegram...*")
+            full_message = f"⚡ *BÁO CÁO NHANH THEO YÊU CẦU (THỦ CÔNG)* ⚡\n\n{report_msg}"
+            
+            if send_telegram_alert(bot_token, chat_id, full_message):
+                status_text.success("🎉 Đã bắn báo cáo Top 10 qua Telegram thành công!")
+            else:
+                status_text.error("Gửi thất bại. Hãy kiểm tra lại Bot Token hoặc Chat ID.")
         else:
             st.error("Thầy vui lòng nhập Bot Token và Chat ID ở trên trước nhé!")
     
@@ -348,7 +362,6 @@ if result is not None:
     price_to_vwap = latest_row['price_to_vwap'].values[0]
     adl_zscore = latest_row['adl_zscore'].values[0]
     
-    # Lấy xu hướng tuần an toàn hơn
     mtf_trend = 1
     if 'mtf_trend_up' in latest_row.columns:
         mtf_trend = latest_row['mtf_trend_up'].values[0]
@@ -641,32 +654,25 @@ if auto_bot and bot_token and chat_id:
     vn_time = datetime.utcnow() + timedelta(hours=7)
     today_str = vn_time.strftime("%Y-%m-%d")
     
-    if vn_time.weekday() < 5: # Chỉ chạy từ Thứ 2 đến Thứ 6
-        
-        # Tạo biên độ 15 phút (từ phút thứ 5 đến phút thứ 20) để đảm bảo Streamlit trên Cloud không lỡ nhịp
+    if vn_time.weekday() < 5: 
         is_9h05 = (vn_time.hour == 9 and 5 <= vn_time.minute <= 20)
         is_13h05 = (vn_time.hour == 13 and 5 <= vn_time.minute <= 20)
         is_15h05 = (vn_time.hour == 15 and 5 <= vn_time.minute <= 20)
 
-        # Còi báo kích hoạt (Chỉ bắn 1 lần duy nhất trong ngày cho mỗi khung giờ)
         trigger_9 = is_9h05 and st.session_state['sent_9h05'] != today_str
         trigger_13 = is_13h05 and st.session_state['sent_13h05'] != today_str
         trigger_15 = is_15h05 and st.session_state['sent_15h05'] != today_str
 
         if trigger_9 or trigger_13 or trigger_15:
-            # Xác định tên bản tin
             if trigger_9: session_name = "SÁNG (9h05)"
             elif trigger_13: session_name = "CHIỀU (13h05)"
             else: session_name = "TỔNG KẾT (15h05)"
             
-            # Lấy thông điệp quét 10 mã
-            report_msg = get_top_10_market_report(5)
+            report_msg = get_top_10_market_report(5) # Auto Bot chạy ngầm, không cần in tiến độ ra màn hình
             full_msg = f"🔔 *BÁO CÁO ĐỊNH KỲ: PHIÊN {session_name}* ({vn_time.strftime('%d/%m')})\n\n{report_msg}"
             
-            # Gửi Tele
             send_telegram_alert(bot_token, chat_id, full_msg)
             
-            # Chốt chặn: Ghi vào bộ nhớ để không bắn 2 lần
             if trigger_9: st.session_state['sent_9h05'] = today_str
             if trigger_13: st.session_state['sent_13h05'] = today_str
             if trigger_15: st.session_state['sent_15h05'] = today_str
