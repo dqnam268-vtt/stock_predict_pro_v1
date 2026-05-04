@@ -235,11 +235,11 @@ def run_advanced_backtest(df_bt, nav):
     return df_bt, win_rate, total_trades
 
 # ==========================================
-# BỘ NÃO TELEGRAM ĐỘC LẬP: LƯỚT NHANH QUYẾT ĐOÁN, BỎ QUA GOOGLE SHEET
+# BỘ NÃO TELEGRAM ĐỘC LẬP: BÁO CÁO TOÀN DIỆN (LUÔN CÓ TOP 10)
 # ==========================================
 def get_top_10_market_report(status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
-    radar_results = []
+    all_results = [] # Biến mới: Lưu toàn bộ kết quả quét để xếp hạng
     
     for i, sym in enumerate(all_tickers):
         if status_element:
@@ -281,31 +281,51 @@ def get_top_10_market_report(status_element=None):
             # Công thức Kelly tiêu chuẩn
             kelly = prob - ((1 - prob) / win_loss_ratio)
             
-            if kelly > 0 and prob >= 0.55: # Chỉ ghi nhận mã ĐẠT CHUẨN
-                radar_results.append({
-                    "sym": sym, 
-                    "buy": current_price, 
-                    "profit": profit_target * 100, 
-                    "kelly": kelly * 100, 
-                    "prob": prob
-                })
+            # ĐÁNH GIÁ CHUẨN MUA (True/False)
+            is_strict_buy = (kelly > 0 and prob >= 0.55)
+            
+            # LƯU TẤT CẢ VÀO DANH SÁCH (Dù xấu hay tốt để xếp hạng)
+            all_results.append({
+                "sym": sym, 
+                "buy": current_price, 
+                "kelly": kelly * 100, 
+                "prob": prob,
+                "is_strict": is_strict_buy
+            })
         except Exception:
             continue # Nếu lỗi mạng, bỏ qua không làm sập tiến trình
             
     if status_element:
         status_element.empty()
 
-    # 4. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10
-    if not radar_results:
-        return "⚠️ *ĐÁNH GIÁ THỊ TRƯỜNG:* Hiện tại **KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA**. Lực bán đang áp đảo, khuyến nghị ÔM TIỀN MẶT đứng ngoài quan sát!\n"
+    if not all_results:
+        return "⚠️ Không thể kết nối dữ liệu thị trường lúc này."
 
-    radar_df = pd.DataFrame(radar_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
+    # 4. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10 TOÀN THỊ TRƯỜNG
+    # Sắp xếp ưu tiên: Prob cao nhất, rồi đến Kelly cao nhất
+    radar_df = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
+    
+    # Kiểm tra xem trong Top 10 có mã nào đạt chuẩn MUA không?
+    has_strict_buys = radar_df['is_strict'].any()
 
-    msg = "🎯 *NHẬN XÉT:* CÁC MÃ DƯỚI ĐÂY ĐÃ **ĐẠT CHUẨN MUA MẠNH MẼ** (Lọc ra TOP 10 tốt nhất Toàn Thị Trường):\n\n"
+    if has_strict_buys:
+        msg = "🎯 *ĐÁNH GIÁ THỊ TRƯỜNG:* Có dòng tiền vào! Dưới đây là TOP 10 mã sáng giá nhất (Lọc từ 50 mã):\n\n"
+    else:
+        msg = "⚠️ *ĐÁNH GIÁ THỊ TRƯỜNG:* Lực bán áp đảo, **KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA AN TOÀN**.\n"
+        msg += "👉 Tuy nhiên, dưới đây là *TOP 10 mã khỏe nhất* để thầy đưa vào **DANH SÁCH THEO DÕI (WATCHLIST)**:\n\n"
+
+    # In danh sách Top 10 kèm Emoji phân loại
     for rank, row in radar_df.iterrows():
-        msg += f"✅ *{row['sym']}* | Vào giá: {row['buy']:,.0f}đ | Tỷ lệ Thắng: {row['prob']*100:.1f}% | Phân bổ Vốn: {row['kelly']:.1f}%\n"
+        if row['is_strict']:
+            icon = "🟢"
+            status = "MUA"
+        else:
+            icon = "🟡"
+            status = "THEO DÕI"
+            
+        msg += f"{icon} *{row['sym']}* ({status}) | Giá: {row['buy']:,.0f}đ | Win: {row['prob']*100:.1f}%\n"
         
-    msg += "\n💡 *Ghi chú chiến lược:* Giá vào là mức giá hiện tại. Lập sẵn lệnh chờ Chốt lời +6%, Cắt lỗ dứt khoát tại -4%."
+    msg += "\n💡 *Ghi chú:* \n- 🟢 Đạt chuẩn AI (Vào lệnh & Quản trị rủi ro +6%/-4%).\n- 🟡 Gần đạt chuẩn (Lưu vào tầm ngắm chờ điểm nổ)."
     return msg
 
 # ==========================================
