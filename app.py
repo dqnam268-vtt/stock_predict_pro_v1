@@ -31,7 +31,6 @@ INDUSTRIES = {
     "🚢 Cảng biển & Thủy sản": ["HAH", "GMD", "VSC", "VHC", "ANV", "FMC"]
 }
 
-# BIẾN TRẠNG THÁI GHI NHỚ ĐỂ KHÔNG BẮN TRÙNG LẶP
 if 'sent_9h05' not in st.session_state: st.session_state['sent_9h05'] = None
 if 'sent_13h05' not in st.session_state: st.session_state['sent_13h05'] = None
 if 'sent_15h05' not in st.session_state: st.session_state['sent_15h05'] = None
@@ -242,22 +241,18 @@ def get_top_10_market_report(status_element=None):
     if status_element:
         status_element.info("⏳ **Đang tung lưới bắt dữ liệu LIVE 50 mã cùng lúc (Bỏ qua Google Sheet)...**")
 
-    # 1. HÚT DATA SIÊU TỐC (BULK DOWNLOAD YFINANCE)
     try:
         yf_symbols = [sym if sym.endswith(".VN") else f"{sym}.VN" for sym in all_tickers]
-        # threads=True giúp tải 50 mã đồng thời trong vòng 2 giây
         bulk_data = yf.download(yf_symbols, period="1y", progress=False, threads=True)
     except Exception as e:
         return "⚠️ *LỖI MẠNG:* Không thể kết nối với Vệ tinh Yahoo Finance. Xin thử lại sau."
         
-    # 2. XỬ LÝ AI HÀNG LOẠT TRÊN RAM
     for i, sym in enumerate(all_tickers):
         if status_element:
             status_element.warning(f"🧠 **AI đang chấm điểm mã: {sym} ({i+1}/50)...**")
             
         yf_sym = sym if sym.endswith(".VN") else f"{sym}.VN"
         try:
-            # Tách dữ liệu của từng mã từ cục Data khổng lồ
             df = pd.DataFrame()
             df['open'] = bulk_data['Open'][yf_sym]
             df['high'] = bulk_data['High'][yf_sym]
@@ -278,7 +273,6 @@ def get_top_10_market_report(status_element=None):
             
             if len(df) < 50: continue
             
-            # Đẩy qua AI
             df_feat = build_features(df)
             if df_feat is None or df_feat.empty: continue
             
@@ -312,7 +306,6 @@ def get_top_10_market_report(status_element=None):
     if not all_results:
         return "⚠️ Lỗi xử lý: AI không thể tính toán dữ liệu trả về."
 
-    # 3. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10
     radar_df = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
     has_strict_buys = radar_df['is_strict'].any()
 
@@ -565,18 +558,18 @@ if result is not None:
                     bt_df, win_rate_pct, total_tr = run_advanced_backtest(bt_df, nav)
                     
                     final_equity = bt_df['strategy_equity'].iloc[-1]
-                    profit_pct = (final_equity / nav - 1) * 100
-                    bnh_profit_pct = (bt_df['bnh_equity'].iloc[-1] / nav - 1) * 100
+                    profit_pct = (final_equity / nav - 1) 
+                    bnh_profit_pct = (bt_df['bnh_equity'].iloc[-1] / nav - 1) 
                     roll_max = bt_df['strategy_equity'].cummax()
-                    max_dd = (bt_df['strategy_equity'] / roll_max - 1).min() * 100
+                    max_dd = (bt_df['strategy_equity'] / roll_max - 1).min() 
                     
                     all_bt_results.append({
                         "Mã CP": sym, 
-                        "Lãi ròng AI": profit_pct / 100, 
-                        "So với Mua ôm": (profit_pct - bnh_profit_pct) / 100, 
+                        "Lãi ròng AI": profit_pct, 
+                        "So với Mua ôm": profit_pct - bnh_profit_pct, 
                         "Win Rate": win_rate_pct / 100, 
                         "Số lệnh": total_tr,
-                        "Drawdown": max_dd / 100
+                        "Drawdown": max_dd
                     })
                     bt_progress.progress((idx + 1) / len(current_tickers))
                 bt_progress.empty()
@@ -594,12 +587,19 @@ if result is not None:
                 if not df_top10.empty:
                     st.success("Tải Bảng Phong Thần thành công trong chớp mắt!")
                     try:
-                        for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Kelly Mua Mới"]:
-                            if col in df_top10.columns: df_top10[col] = df_top10[col].astype(float)
-                        if "Giá Canh Mua" in df_top10.columns: df_top10["Giá Canh Mua"] = df_top10["Giá Canh Mua"].astype(float)
+                        # BẢN VÁ: RỬA SẠCH DỮ LIỆU TỪ GOOGLE SHEET VỀ LẠI SỐ THỰC CHUẨN
+                        for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Giá Canh Mua", "Kelly Mua Mới"]:
+                            if col in df_top10.columns:
+                                df_top10[col] = df_top10[col].astype(str).str.replace("'", "").str.replace(",", ".").astype(float)
                         
-                        st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
-                    except:
+                        st.dataframe(df_top10.style.format({
+                            "Lãi ròng AI": "{:+.2%}", 
+                            "Tỷ lệ Thắng": "{:.1%}", 
+                            "Giá Canh Mua": "{:,.0f} đ", 
+                            "Kelly Mua Mới": "{:.1%}"
+                        }).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
+                    except Exception as e:
+                        st.error("⚠️ Định dạng cũ bị lỗi. Thầy vui lòng bấm nút 'Cập nhật Bảng (Quét 50 mã)' để AI ghi đè dữ liệu mới chuẩn hóa lên Google Sheet nhé!")
                         st.dataframe(df_top10, use_container_width=True)
                 else:
                     st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
@@ -620,18 +620,18 @@ if result is not None:
                     bt_df['prob'] = res_bt['all_probs'][-bt_days_actual:]
                     
                     bt_df, win_rate_pct, total_tr = run_advanced_backtest(bt_df, nav)
-                    profit_pct = (bt_df['strategy_equity'].iloc[-1] / nav - 1) * 100
+                    profit_pct = (bt_df['strategy_equity'].iloc[-1] / nav - 1) 
                     
                     scan_prob = res_bt['prob']
                     cur_price = res_bt['df_feat']['close'].iloc[-1]
-                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(0.06/0.04)))) * 100
+                    scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(0.06/0.04)))) 
 
                     all_top10_results.append({
                         "Mã CP": sym, 
-                        "Lãi ròng AI": profit_pct / 100, 
+                        "Lãi ròng AI": profit_pct, 
                         "Tỷ lệ Thắng": win_rate_pct / 100,
                         "Giá Canh Mua": cur_price,
-                        "Kelly Mua Mới": scan_kelly / 100
+                        "Kelly Mua Mới": scan_kelly
                     })
                     bt_progress.progress((idx + 1) / len(all_tickers_list))
                 
@@ -639,11 +639,22 @@ if result is not None:
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
-                    loader = CloudDataLoader()
-                    loader.save_leaderboard(df_top10)
                     
-                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet! Từ nay chỉ cần bấm 'Xem Bảng' là hiện ra ngay.")
-                    st.dataframe(df_top10.style.format({"Lãi ròng AI": "{:+.2%}", "Tỷ lệ Thắng": "{:.1%}", "Giá Canh Mua": "{:,.0f} đ", "Kelly Mua Mới": "{:.1%}"}).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
+                    # BẢN VÁ: ĐÓNG BĂNG TEXT CHỐNG GOOGLE SHEET PHÁ BĨNH
+                    df_top10_save = df_top10.copy()
+                    for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Giá Canh Mua", "Kelly Mua Mới"]:
+                        df_top10_save[col] = df_top10_save[col].apply(lambda x: f"'{x}")
+                    
+                    loader = CloudDataLoader()
+                    loader.save_leaderboard(df_top10_save)
+                    
+                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet thành công!")
+                    st.dataframe(df_top10.style.format({
+                        "Lãi ròng AI": "{:+.2%}", 
+                        "Tỷ lệ Thắng": "{:.1%}", 
+                        "Giá Canh Mua": "{:,.0f} đ", 
+                        "Kelly Mua Mới": "{:.1%}"
+                    }).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
                     
     with tab5:
         st.subheader("🧠 Trạng thái Đào tạo & Kho dữ liệu")
@@ -651,7 +662,7 @@ if result is not None:
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
         col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã gỡ bỏ mô hình dự báo sinh tỷ lệ nổ lũy thừa.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã trang bị tính năng Chống xung đột chuẩn Số thập phân (Locale bug).")
 
 # ==========================================
 # BỘ NÃO CHẠY NGẦM (AUTO-BOT: 9h05, 13h05, 15h05)
