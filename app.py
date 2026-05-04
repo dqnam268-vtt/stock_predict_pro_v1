@@ -73,7 +73,6 @@ class CloudDataLoader:
         if 'date' in df.columns and df['date'].dt.tz is not None:
             df['date'] = df['date'].dt.tz_localize(None)
             
-        # Dọn rác cơ bản
         invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
         df.loc[invalid_rows, 'close'] = np.nan
         df['close'].ffill(inplace=True)
@@ -163,16 +162,15 @@ def analyze_symbol(symbol, future_days):
     reg_model_adapt = XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, random_state=99)
     reg_model_adapt.fit(X_adapt, y_adapt)
     
-    # BẢN VÁ: GÔNG CÙM CHỐNG NỔ GIÁ LŨY THỪA TRÊN BIỂU ĐỒ
     current_price_baseline = df['close'].iloc[-1]
-    max_bound = current_price_baseline * 1.15 # Chỉ cho phép dao động tối đa 15%
+    max_bound = current_price_baseline * 1.15
     min_bound = current_price_baseline * 0.85
     
     future_preds_adapt = []
     current_lags_adapt = df['close'].iloc[-5:].values.tolist()
     for _ in range(future_days):
         pred = reg_model_adapt.predict(np.array([current_lags_adapt]))[0]
-        pred = float(np.clip(pred, min_bound, max_bound)) # Ép giá về vùng thực tế
+        pred = float(np.clip(pred, min_bound, max_bound))
         future_preds_adapt.append(pred)
         current_lags_adapt.pop(0)
         current_lags_adapt.append(pred)
@@ -235,23 +233,41 @@ def run_advanced_backtest(df_bt, nav):
     return df_bt, win_rate, total_trades
 
 # ==========================================
-# BỘ NÃO TELEGRAM ĐỘC LẬP: BÁO CÁO TOÀN DIỆN (LUÔN CÓ TOP 10)
+# BỘ NÃO TỐC ĐỘ BÀN THỜ: TẢI SỈ (BULK DOWNLOAD) CHỐNG TREO MÁY
 # ==========================================
 def get_top_10_market_report(status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
-    all_results = [] # Biến mới: Lưu toàn bộ kết quả quét để xếp hạng
+    all_results = [] 
     
+    if status_element:
+        status_element.info("⏳ **Đang tung lưới bắt dữ liệu LIVE 50 mã cùng lúc (Bỏ qua Google Sheet)...**")
+
+    # 1. HÚT DATA SIÊU TỐC (BULK DOWNLOAD YFINANCE)
+    try:
+        yf_symbols = [sym if sym.endswith(".VN") else f"{sym}.VN" for sym in all_tickers]
+        # threads=True giúp tải 50 mã đồng thời trong vòng 2 giây
+        bulk_data = yf.download(yf_symbols, period="1y", progress=False, threads=True)
+    except Exception as e:
+        return "⚠️ *LỖI MẠNG:* Không thể kết nối với Vệ tinh Yahoo Finance. Xin thử lại sau."
+        
+    # 2. XỬ LÝ AI HÀNG LOẠT TRÊN RAM
     for i, sym in enumerate(all_tickers):
         if status_element:
-            status_element.info(f"⏳ **Bỏ qua GG Sheet, đang hút dữ liệu Live cho: {sym} ({i+1}/50)...**")
+            status_element.warning(f"🧠 **AI đang chấm điểm mã: {sym} ({i+1}/50)...**")
             
+        yf_sym = sym if sym.endswith(".VN") else f"{sym}.VN"
         try:
-            # 1. HÚT DATA TRỰC TIẾP TRÊN RAM (Tránh bị Google Sheet khóa mỏm)
-            yf_symbol = sym if sym.endswith(".VN") else f"{sym}.VN"
-            df = yf.Ticker(yf_symbol).history(period="1y")
-            if df.empty: continue
+            # Tách dữ liệu của từng mã từ cục Data khổng lồ
+            df = pd.DataFrame()
+            df['open'] = bulk_data['Open'][yf_sym]
+            df['high'] = bulk_data['High'][yf_sym]
+            df['low'] = bulk_data['Low'][yf_sym]
+            df['close'] = bulk_data['Close'][yf_sym]
+            df['volume'] = bulk_data['Volume'][yf_sym]
+            
             df.reset_index(inplace=True)
-            df.columns = [c.lower() for c in df.columns]
+            df.rename(columns={'Date': 'date', 'Datetime': 'date'}, inplace=True)
+            
             if 'date' in df.columns and df['date'].dt.tz is not None:
                 df['date'] = df['date'].dt.tz_localize(None)
                 
@@ -262,7 +278,7 @@ def get_top_10_market_report(status_element=None):
             
             if len(df) < 50: continue
             
-            # 2. XỬ LÝ QUA NÃO AI
+            # Đẩy qua AI
             df_feat = build_features(df)
             if df_feat is None or df_feat.empty: continue
             
@@ -273,18 +289,13 @@ def get_top_10_market_report(status_element=None):
             
             current_price = df_feat['close'].iloc[-1]
             
-            # 3. QUẢN TRỊ RỦI RO THỰC CHIẾN (Chống nổ giá)
-            profit_target = 0.06 # Tỷ lệ chốt lời kỳ vọng +6%
-            loss_limit = 0.04    # Tỷ lệ cắt lỗ -4%
+            profit_target = 0.06 
+            loss_limit = 0.04    
             win_loss_ratio = profit_target / loss_limit
-            
-            # Công thức Kelly tiêu chuẩn
             kelly = prob - ((1 - prob) / win_loss_ratio)
             
-            # ĐÁNH GIÁ CHUẨN MUA (True/False)
             is_strict_buy = (kelly > 0 and prob >= 0.55)
             
-            # LƯU TẤT CẢ VÀO DANH SÁCH (Dù xấu hay tốt để xếp hạng)
             all_results.append({
                 "sym": sym, 
                 "buy": current_price, 
@@ -293,19 +304,16 @@ def get_top_10_market_report(status_element=None):
                 "is_strict": is_strict_buy
             })
         except Exception:
-            continue # Nếu lỗi mạng, bỏ qua không làm sập tiến trình
+            continue 
             
     if status_element:
         status_element.empty()
 
     if not all_results:
-        return "⚠️ Không thể kết nối dữ liệu thị trường lúc này."
+        return "⚠️ Lỗi xử lý: AI không thể tính toán dữ liệu trả về."
 
-    # 4. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10 TOÀN THỊ TRƯỜNG
-    # Sắp xếp ưu tiên: Prob cao nhất, rồi đến Kelly cao nhất
+    # 3. CHỐT NHẬN XÉT THỊ TRƯỜNG & XẾP HẠNG TOP 10
     radar_df = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
-    
-    # Kiểm tra xem trong Top 10 có mã nào đạt chuẩn MUA không?
     has_strict_buys = radar_df['is_strict'].any()
 
     if has_strict_buys:
@@ -314,7 +322,6 @@ def get_top_10_market_report(status_element=None):
         msg = "⚠️ *ĐÁNH GIÁ THỊ TRƯỜNG:* Lực bán áp đảo, **KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA AN TOÀN**.\n"
         msg += "👉 Tuy nhiên, dưới đây là *TOP 10 mã khỏe nhất* để thầy đưa vào **DANH SÁCH THEO DÕI (WATCHLIST)**:\n\n"
 
-    # In danh sách Top 10 kèm Emoji phân loại
     for rank, row in radar_df.iterrows():
         if row['is_strict']:
             icon = "🟢"
@@ -350,7 +357,6 @@ with st.sidebar:
     
     st.write("")
     
-    # NÚT BÁO CỨNG (ĐÃ SỬA CHUẨN)
     if st.button("🚀 GỬI BÁO CÁO TOP 10 NGAY", use_container_width=True, type="primary"):
         if bot_token and chat_id:
             status_text = st.empty() 
@@ -418,7 +424,6 @@ if result is not None:
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
 
-    # Đưa giá trị UI về quy chuẩn chung
     buy_date = future_dates[0]
     buy_price = current_price
     
