@@ -12,7 +12,7 @@ import requests
 import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import google.generativeai as genai # BỘ NÃO GEMINI
+import google.generativeai as genai
 
 # KẾT NỐI MODULE BỘ NÃO VĨ MÔ
 from ai_core import build_features, AIModel
@@ -326,6 +326,47 @@ def get_top_10_market_report(status_element=None):
     msg += "\n💡 *Ghi chú:* \n- 🟢 Đạt chuẩn AI (Vào lệnh & Quản trị rủi ro +6%/-4%).\n- 🟡 Gần đạt chuẩn (Lưu vào tầm ngắm chờ điểm nổ)."
     return msg
 
+# ------------------------------------------------------------------
+# BỘ CHUYỂN ĐỔI CHỈ BÁO THÀNH THANG ĐIỂM 100 (19 TIÊU CHÍ)
+# ------------------------------------------------------------------
+def safe_score(val):
+    if np.isnan(val) or np.isinf(val): return 50
+    return min(100, max(0, int(val)))
+
+def get_19_criteria_scores(row, prob, df):
+    scores = {}
+    row_dict = row.iloc[0].to_dict()
+    
+    scores["1. XU HƯỚNG: Vị thế so với MA50 (Trung hạn)"] = safe_score((row_dict.get('price_to_ma50', 0) + 0.1) * 500)
+    scores["2. XU HƯỚNG: Vị thế so với MA200 (Dài hạn)"] = safe_score((row_dict.get('price_to_ma200', 0) + 0.2) * 250)
+    scores["3. DÒNG TIỀN: Vị thế so với VWAP (Khớp lệnh)"] = safe_score((row_dict.get('price_to_vwap', 0) + 0.05) * 1000)
+    
+    scores["4. ĐỘNG LƯỢNG: Sức mạnh RSI 14"] = safe_score(row_dict.get('rsi_14', 50))
+    scores["5. ĐỘNG LƯỢNG: Xung lực MACD Histogram"] = safe_score(50 + row_dict.get('macd_hist', 0) * 5000)
+    scores["6. ĐỘT BIẾN: Chỉ số Z-Score (Gia tốc giá)"] = safe_score(50 + row_dict.get('z_score', 0) * 20)
+    
+    scores["7. DÒNG TIỀN: Áp lực Mua/Bán (Chaikin CMF)"] = safe_score(50 + row_dict.get('cmf_20', 0) * 200)
+    scores["8. DÒNG TIỀN: Mức độ Tích lũy (ADL Z-Score)"] = safe_score(50 + row_dict.get('adl_zscore', 0) * 20)
+    
+    vol_ratio = df['volume'].iloc[-1] / (df['volume'].rolling(20).mean().iloc[-1] + 1) if len(df) > 20 else 1
+    scores["9. DÒNG TIỀN: Đột biến Khối lượng (Volume)"] = safe_score(50 + (vol_ratio - 1) * 25)
+    
+    scores["10. BĂNG TẦN: Vị trí dải Bollinger (%B)"] = safe_score(row_dict.get('bb_pct_b', 0.5) * 100)
+    scores["11. BĂNG TẦN: Độ nén dải (Bollinger Width)"] = safe_score(100 - row_dict.get('bb_width', 0.1) * 500) 
+    scores["12. RỦI RO: Tốc độ biến động (ATR Ratio)"] = safe_score(100 - row_dict.get('atr_ratio', 1) * 50) 
+    scores["13. RỦI RO: Mức độ nhiễu loạn (Volatility)"] = safe_score(100 - row_dict.get('volatility', 0) * 1000)
+    
+    scores["14. ĐA KHUNG: Sức mạnh Tuần (Weekly MACD)"] = safe_score(50 + row_dict.get('weekly_macd_hist', 0) * 5000)
+    scores["15. ĐA KHUNG: Quán tính 4 Tuần (Momentum)"] = safe_score(50 + row_dict.get('momentum_4w', 0) * 200)
+    
+    scores["16. THỐNG KÊ: Tính bền vững xu hướng (Hurst)"] = safe_score(row_dict.get('hurst', 0.5) * 100)
+    scores["17. THỐNG KÊ: Tỷ suất lợi nhuận (Returns)"] = safe_score(50 + row_dict.get('returns', 0) * 1000)
+    scores["18. CƠ BẢN: Lịch sử Cổ tức/Chia tách"] = 100 if (row_dict.get('dividends', 0) > 0 or row_dict.get('stock_splits', 0) > 0) else 50
+    
+    scores["19. TỔNG HỢP: Điểm AI Định lượng (XGBoost)"] = safe_score(prob * 100)
+    
+    return scores
+
 # ==========================================
 # PHẦN 3: GIAO DIỆN APP (UI)
 # ==========================================
@@ -452,22 +493,8 @@ if result is not None:
     kelly_pct = max(0, (prob - ((1 - prob) / win_loss_ratio))) * 100 
     shares_to_buy = int((nav * (kelly_pct / 100)) / current_price) if current_price > 0 else 0
     
-    # ------------------------------------------------------------------
-    # TÍNH TOÁN BẢNG ĐIỂM 100 CHO 19 TIÊU CHÍ (Percentile Rank)
-    # ------------------------------------------------------------------
-    feature_scores = {}
-    exclude_cols = ['date', 'open', 'high', 'low', 'close', 'volume', 'mtf_trend_up']
-    calc_cols = [c for c in df_feat.columns if c not in exclude_cols]
-    
-    for col in calc_cols:
-        historical_data = df_feat[col].dropna()
-        if len(historical_data) > 0:
-            latest_val = latest_row[col].values[0]
-            # Tính phần trăm thời gian trong quá khứ mà chỉ số này thấp hơn hoặc bằng hiện tại
-            percentile = (historical_data <= latest_val).mean() * 100
-            feature_scores[col] = int(percentile)
-            
-    # Tổng điểm tổng hợp (AI Prob)
+    # GỌI HÀM CHẤM 19 ĐIỂM
+    feature_scores = get_19_criteria_scores(latest_row, prob, df)
     overall_score = int(prob * 100)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
@@ -477,7 +504,6 @@ if result is not None:
         with col1:
             st.info("💡 Điểm Tổng Hợp AI (Thang 100)")
             
-            # Hiển thị Điểm Tổng Hợp Cực Đẹp
             st.markdown(f"<h1 style='text-align: center; color: {'#00CC00' if overall_score >= 55 else '#FF0000'}; font-size: 60px;'>{overall_score}</h1>", unsafe_allow_html=True)
             st.progress(overall_score / 100)
             st.write("---")
@@ -541,7 +567,6 @@ if result is not None:
                 else:
                     with st.spinner("Gemini đang đọc biểu đồ và bảng điểm..."):
                         try:
-                            # Chuẩn bị Prompt siêu cấp cho Gemini
                             model_ai = genai.GenerativeModel('gemini-pro')
                             prompt = f"""
                             Đóng vai một chuyên gia giao dịch định lượng (Quant Trader). Hãy viết 1 đoạn nhận xét ngắn gọn (khoảng 3-4 câu) bằng tiếng Việt cho cổ phiếu {symbol}.
@@ -551,7 +576,7 @@ if result is not None:
                             - Chỉ báo giá trị thực (VWAP): {'Tốt' if price_to_vwap > 0 else 'Xấu'}.
                             - Xu hướng khung tuần: {'Tăng' if mtf_trend == 1 else 'Rủi ro'}.
                             - Tỷ trọng vốn khuyến nghị (Kelly): {kelly_pct:.1f}%.
-                            Kết luận dứt khoát: Có nên mua hay không? (Nên mua nếu Điểm AI > 55 và Kelly > 0). Văn phong chuyên nghiệp, lạnh lùng, dứt khoát.
+                            Kết luận dứt khoát: Có nên mua hay không? (Nên mua nếu Điểm AI >= 55 và Kelly > 0). Văn phong chuyên nghiệp, lạnh lùng, dứt khoát.
                             """
                             response = model_ai.generate_content(prompt)
                             st.session_state[f'gemini_comment_{symbol}'] = response.text
@@ -565,7 +590,6 @@ if result is not None:
             st.subheader("✈️ Bắn tín hiệu cá nhân")
             if st.button(f"📲 Gửi Phím hàng mã {symbol} qua Telegram", use_container_width=True, type="secondary"):
                 if bot_token and chat_id:
-                    # Ráp tin nhắn
                     gemini_text = st.session_state.get(f'gemini_comment_{symbol}', "Chưa có nhận định từ Gemini.")
                     status_icon = "🟢 MUA" if (kelly_pct > 0 and prob >= 0.55) else "⚠️ ĐỨNG NGOÀI"
                     
@@ -589,16 +613,13 @@ if result is not None:
         # ------------------------------------------------------------------
         st.write("")
         with st.expander("🔎 XEM BẢNG CHẤM ĐIỂM CHI TIẾT 19 TIÊU CHÍ VĨ MÔ (Thang 100)"):
-            st.caption("Thuật toán Percentile Rank: Máy tính đem chỉ số của ngày hôm nay so sánh với 250 ngày trong quá khứ. Điểm 90 nghĩa là chỉ số hôm nay đang lớn hơn 90% thời gian trong năm qua.")
+            st.caption("Thuật toán đã dịch các chỉ báo kỹ thuật thô thành ngôn ngữ Giao dịch Định lượng. Điểm được chuẩn hóa từ 0 đến 100 (100 = Cực kỳ Tích cực/An toàn, 0 = Cực kỳ Tiêu cực/Rủi ro).")
             
-            # Chia làm 3 cột để hiển thị cho gọn
             score_cols = st.columns(3)
             for i, (feat_name, f_score) in enumerate(feature_scores.items()):
                 col_idx = i % 3
                 with score_cols[col_idx]:
-                    st.markdown(f"**{feat_name.upper()}**: {f_score}/100")
-                    # Tô màu progress bar: Xanh nếu điểm cao, Đỏ nếu điểm thấp
-                    color = "normal"
+                    st.markdown(f"**{feat_name}**: {f_score}/100")
                     st.progress(f_score / 100)
 
     with tab2:
@@ -732,7 +753,7 @@ if result is not None:
                             best_sym = valid_buys.iloc[0]['Mã CP']
                             st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Hệ thống phát hiện **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
                         else:
-                            st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Lực bán trên diện rộng đang áp đảo. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và đưa Top 10 này vào Danh sách theo dõi!")
+                            st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Lực bán trên diện rộng đang áp đảo. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
                         st.markdown("---")
                         
                         st.dataframe(df_top10.style.format({
