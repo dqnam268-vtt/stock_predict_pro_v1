@@ -392,7 +392,7 @@ with st.sidebar:
         genai.configure(api_key=gemini_api_key)
     
     st.markdown("---")
-    st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
+    st.header("⚙️ Chế độ Tự Động)")
     auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
     st.caption("AI tự chạy ngầm. Sẽ tự động gửi Báo cáo Top 10 toàn TT vào đúng các mốc: 9h05, 13h05 và 15h05.")
     
@@ -416,7 +416,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("✨ Tối ưu & Phát triển bởi **NamY**")
     
-st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
+st.title("Hệ thống Dự báo AI Quant")
 
 if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
     st.cache_data.clear()
