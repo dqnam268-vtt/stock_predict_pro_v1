@@ -12,6 +12,7 @@ import requests
 import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import google.generativeai as genai # BỘ NÃO GEMINI
 
 # KẾT NỐI MODULE BỘ NÃO VĨ MÔ
 from ai_core import build_features, AIModel
@@ -231,9 +232,6 @@ def run_advanced_backtest(df_bt, nav):
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return df_bt, win_rate, total_trades
 
-# ==========================================
-# BỘ NÃO TỐC ĐỘ BÀN THỜ: TẢI SỈ (BULK DOWNLOAD) CHỐNG TREO MÁY
-# ==========================================
 def get_top_10_market_report(status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
     all_results = [] 
@@ -331,17 +329,26 @@ def get_top_10_market_report(status_element=None):
 # ==========================================
 # PHẦN 3: GIAO DIỆN APP (UI)
 # ==========================================
-st.set_page_config(page_title="AI Quant - Thầy Nam", layout="wide")
+st.set_page_config(page_title="AI Quant - Bảng Điều Khiển", layout="wide")
 
 with st.sidebar:
-    st.header("🤖 Cài đặt Telegram Bot")
+    st.header("🤖 Cài đặt Bot & API")
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-        st.success("✅ Đã kết nối khóa bảo mật Cloud!")
+        st.success("✅ Đã kết nối khóa Telegram!")
     except:
-        bot_token = st.text_input("🔑 Bot Token:", type="password")
-        chat_id = st.text_input("💬 Chat ID:")
+        bot_token = st.text_input("🔑 Telegram Bot Token:", type="password")
+        chat_id = st.text_input("💬 Telegram Chat ID:")
+        
+    try:
+        gemini_api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("✅ Đã kết nối khóa Gemini AI!")
+    except:
+        gemini_api_key = st.text_input("🧠 Gemini API Key (Tùy chọn):", type="password")
+        
+    if gemini_api_key:
+        genai.configure(api_key=gemini_api_key)
     
     st.markdown("---")
     st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
@@ -364,6 +371,9 @@ with st.sidebar:
                 status_text.error("Gửi thất bại. Hãy kiểm tra lại Bot Token hoặc Chat ID.")
         else:
             st.error("Thầy vui lòng nhập Bot Token và Chat ID ở trên trước nhé!")
+            
+    st.markdown("---")
+    st.caption("✨ Tối ưu & Phát triển bởi **NamY**")
     
 st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
@@ -417,23 +427,61 @@ if result is not None:
     last_date = df['date'].iloc[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=future_days)
 
-    buy_date = future_dates[0]
-    buy_price = current_price
+    future_min_idx = int(np.argmin(future_preds_adapt))
+    buy_date_chart = future_dates[future_min_idx]
+    buy_price_chart = future_preds_adapt[future_min_idx]
     
+    can_sell_chart = False
+    sell_date_chart = None
+    sell_price_chart = None
+    chart_profit_pct = 0
+    
+    if future_min_idx + 1 < len(future_preds_adapt):
+        valid_sell_slice = future_preds_adapt[future_min_idx + 1:]
+        offset_idx = int(np.argmax(valid_sell_slice))
+        future_max_idx = future_min_idx + 1 + offset_idx
+        
+        sell_date_chart = future_dates[future_max_idx]
+        sell_price_chart = future_preds_adapt[future_max_idx]
+        chart_profit_pct = (sell_price_chart - buy_price_chart) / buy_price_chart * 100
+        can_sell_chart = True
+
     profit_expectation = 0.06
     loss_expectation = 0.04
     win_loss_ratio = profit_expectation / loss_expectation
     kelly_pct = max(0, (prob - ((1 - prob) / win_loss_ratio))) * 100 
-    shares_to_buy = int((nav * (kelly_pct / 100)) / buy_price) if buy_price > 0 else 0
+    shares_to_buy = int((nav * (kelly_pct / 100)) / current_price) if current_price > 0 else 0
+    
+    # ------------------------------------------------------------------
+    # TÍNH TOÁN BẢNG ĐIỂM 100 CHO 19 TIÊU CHÍ (Percentile Rank)
+    # ------------------------------------------------------------------
+    feature_scores = {}
+    exclude_cols = ['date', 'open', 'high', 'low', 'close', 'volume', 'mtf_trend_up']
+    calc_cols = [c for c in df_feat.columns if c not in exclude_cols]
+    
+    for col in calc_cols:
+        historical_data = df_feat[col].dropna()
+        if len(historical_data) > 0:
+            latest_val = latest_row[col].values[0]
+            # Tính phần trăm thời gian trong quá khứ mà chỉ số này thấp hơn hoặc bằng hiện tại
+            percentile = (historical_data <= latest_val).mean() * 100
+            feature_scores[col] = int(percentile)
+            
+    # Tổng điểm tổng hợp (AI Prob)
+    overall_score = int(prob * 100)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Dự báo Chi tiết", "📊 Kỷ luật Thực chiến", "🏆 Radar Tín Hiệu", "📈 Xếp Hạng Ngành", "🧠 Tình trạng AI"])
     
     with tab1:
         col1, col2 = st.columns([1, 2.8])
         with col1:
-            st.info("💡 Tín hiệu AI & Dòng tiền")
-            st.metric("Xác suất tăng (Đạt chuẩn > 55%)", f"{prob*100:.1f}%")
+            st.info("💡 Điểm Tổng Hợp AI (Thang 100)")
+            
+            # Hiển thị Điểm Tổng Hợp Cực Đẹp
+            st.markdown(f"<h1 style='text-align: center; color: {'#00CC00' if overall_score >= 55 else '#FF0000'}; font-size: 60px;'>{overall_score}</h1>", unsafe_allow_html=True)
+            st.progress(overall_score / 100)
             st.write("---")
+            
             st.write(f"- **VWAP:** {'Tích cực' if price_to_vwap > 0 else 'Tiêu cực'}")
             st.write(f"- **ADL:** {'Gom hàng' if adl_zscore > 0 else 'Xả hàng'}")
             
@@ -441,6 +489,13 @@ if result is not None:
                 st.write("- **Khung Tuần:** Đồng thuận Tăng 📈")
             else:
                 st.write("- **Khung Tuần:** Đang rủi ro (Nên cẩn trọng) ⚠️")
+
+            st.write("---")
+            st.write("🎯 **DỰ PHÓNG CỰC TRỊ:**")
+            st.write(f"- 🟢 **MUA:** {buy_date_chart.strftime('%d/%m/%Y')} (~ {buy_price_chart:,.0f}đ)")
+            if can_sell_chart:
+                st.write(f"- 🔴 **BÁN:** {sell_date_chart.strftime('%d/%m/%Y')} (~ {sell_price_chart:,.0f}đ)")
+                st.write(f"*(Biên độ: +{chart_profit_pct:.1f}%)*")
 
         with col2:
             st.subheader(f"Biểu đồ Đa chiều - {symbol}")
@@ -453,7 +508,11 @@ if result is not None:
                 fig.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['close'], mode='lines', name='Giá thực tế', line=dict(color='#1f77b4', width=2)), row=1, col=1)
             
             fig.add_trace(go.Scatter(x=future_dates, y=future_preds_adapt, mode='lines', name='AI Dự đoán Cực trị', line=dict(color='magenta', width=2.5, dash='dash')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=[buy_date], y=[buy_price], mode='markers', name='MUA', marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[buy_date_chart], y=[buy_price_chart], mode='markers', name='Đáy MUA dự kiến', marker=dict(color='lime', symbol='triangle-up', size=16, line=dict(color='black', width=1))), row=1, col=1)
+            
+            if can_sell_chart:
+                fig.add_trace(go.Scatter(x=[sell_date_chart], y=[sell_price_chart], mode='markers', name='Đỉnh BÁN dự kiến', marker=dict(color='red', symbol='triangle-down', size=16, line=dict(color='black', width=1))), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[buy_date_chart, sell_date_chart], y=[buy_price_chart, sell_price_chart], mode='lines', name='Biên lợi nhuận', line=dict(color='green', width=1.5, dash='dot')), row=1, col=1)
 
             volume_colors = ['#00CC00' if row['close'] >= row['open'] else '#FF0000' for _, row in df_plot.iterrows()]
             fig.add_trace(go.Bar(x=df_plot['date'], y=df_plot['volume'], marker_color=volume_colors, name='Volume'), row=2, col=1)
@@ -463,9 +522,84 @@ if result is not None:
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
         if kelly_pct > 0 and prob >= 0.55:
-            st.success(f"**🟢 CHUẨN MUA MẠNH:** {symbol} - Khuyến nghị dùng {kelly_pct:.1f}% Vốn ({shares_to_buy:,} Cổ phiếu). Lãi kỳ vọng +6% / Cắt lỗ -4%.")
+            st.success(f"**🟢 ĐẠT CHUẨN:** {symbol} - Đề xuất vào {kelly_pct:.1f}% Vốn ({shares_to_buy:,} CP). Lãi kỳ vọng +6% / Cắt lỗ -4%.")
         else:
-            st.warning(f"**⚠️ CHƯA ĐẠT CHUẨN MUA:** {symbol} - Xác suất chưa đủ 55% hoặc điểm mù rủi ro. Nên đứng ngoài quan sát.")
+            st.warning(f"**⚠️ CHƯA ĐẠT CHUẨN:** {symbol} - Điểm AI chưa đủ 55 hoặc rủi ro ẩn. Khuyến nghị đứng ngoài.")
+            
+        st.markdown("---")
+        
+        # ------------------------------------------------------------------
+        # VÙNG NHẬN XÉT GEMINI AI & GỬI TELEGRAM CHO MÃ ĐƠN LẺ
+        # ------------------------------------------------------------------
+        col_gemini, col_tele = st.columns(2)
+        
+        with col_gemini:
+            st.subheader("🧠 Hỏi Chuyên gia Gemini")
+            if st.button("💬 Phân tích mã " + symbol, use_container_width=True):
+                if not gemini_api_key:
+                    st.error("⚠️ Thầy cần nhập Gemini API Key ở thanh menu bên trái trước!")
+                else:
+                    with st.spinner("Gemini đang đọc biểu đồ và bảng điểm..."):
+                        try:
+                            # Chuẩn bị Prompt siêu cấp cho Gemini
+                            model_ai = genai.GenerativeModel('gemini-pro')
+                            prompt = f"""
+                            Đóng vai một chuyên gia giao dịch định lượng (Quant Trader). Hãy viết 1 đoạn nhận xét ngắn gọn (khoảng 3-4 câu) bằng tiếng Việt cho cổ phiếu {symbol}.
+                            Dữ liệu thuật toán hiện tại:
+                            - Điểm sức mạnh AI (Xác suất tăng): {overall_score}/100.
+                            - Cường độ dòng tiền (ADL): {'Dương (Đang gom hàng)' if adl_zscore > 0 else 'Âm (Đang xả hàng)'}.
+                            - Chỉ báo giá trị thực (VWAP): {'Tốt' if price_to_vwap > 0 else 'Xấu'}.
+                            - Xu hướng khung tuần: {'Tăng' if mtf_trend == 1 else 'Rủi ro'}.
+                            - Tỷ trọng vốn khuyến nghị (Kelly): {kelly_pct:.1f}%.
+                            Kết luận dứt khoát: Có nên mua hay không? (Nên mua nếu Điểm AI > 55 và Kelly > 0). Văn phong chuyên nghiệp, lạnh lùng, dứt khoát.
+                            """
+                            response = model_ai.generate_content(prompt)
+                            st.session_state[f'gemini_comment_{symbol}'] = response.text
+                        except Exception as e:
+                            st.error(f"Lỗi API Gemini: {str(e)}")
+                            
+            if f'gemini_comment_{symbol}' in st.session_state:
+                st.info(st.session_state[f'gemini_comment_{symbol}'])
+
+        with col_tele:
+            st.subheader("✈️ Bắn tín hiệu cá nhân")
+            if st.button(f"📲 Gửi Phím hàng mã {symbol} qua Telegram", use_container_width=True, type="secondary"):
+                if bot_token and chat_id:
+                    # Ráp tin nhắn
+                    gemini_text = st.session_state.get(f'gemini_comment_{symbol}', "Chưa có nhận định từ Gemini.")
+                    status_icon = "🟢 MUA" if (kelly_pct > 0 and prob >= 0.55) else "⚠️ ĐỨNG NGOÀI"
+                    
+                    single_msg = f"🔍 *PHÂN TÍCH ĐỘC LẬP: {symbol}* ({status_icon})\n\n"
+                    single_msg += f"- Điểm Sức mạnh AI: *{overall_score}/100*\n"
+                    single_msg += f"- Giá hiện tại: {current_price:,.0f}đ\n"
+                    single_msg += f"- Điểm vào lệnh cực trị (Dự kiến): {buy_price_chart:,.0f}đ\n"
+                    single_msg += f"- Điểm chốt lời cực trị (Dự kiến): {sell_price_chart:,.0f}đ\n"
+                    single_msg += f"- Phân bổ Vốn (Kelly): {kelly_pct:.1f}%\n\n"
+                    single_msg += f"🤖 *Chuyên gia Gemini nhận định:*\n_{gemini_text}_"
+                    
+                    if send_telegram_alert(bot_token, chat_id, single_msg):
+                        st.success("Đã bắn báo cáo mã này thành công!")
+                    else:
+                        st.error("Gửi thất bại. Check lại API Telegram.")
+                else:
+                    st.error("Chưa nhập thông tin Telegram!")
+
+        # ------------------------------------------------------------------
+        # BẢNG ĐIỂM CHI TIẾT 19 TIÊU CHÍ 
+        # ------------------------------------------------------------------
+        st.write("")
+        with st.expander("🔎 XEM BẢNG CHẤM ĐIỂM CHI TIẾT 19 TIÊU CHÍ VĨ MÔ (Thang 100)"):
+            st.caption("Thuật toán Percentile Rank: Máy tính đem chỉ số của ngày hôm nay so sánh với 250 ngày trong quá khứ. Điểm 90 nghĩa là chỉ số hôm nay đang lớn hơn 90% thời gian trong năm qua.")
+            
+            # Chia làm 3 cột để hiển thị cho gọn
+            score_cols = st.columns(3)
+            for i, (feat_name, f_score) in enumerate(feature_scores.items()):
+                col_idx = i % 3
+                with score_cols[col_idx]:
+                    st.markdown(f"**{feat_name.upper()}**: {f_score}/100")
+                    # Tô màu progress bar: Xanh nếu điểm cao, Đỏ nếu điểm thấp
+                    color = "normal"
+                    st.progress(f_score / 100)
 
     with tab2:
         st.subheader(f"Mô phỏng Đánh tiền Thật (Đã trừ Phí 0.15% & Thuế) - Mã {symbol}")
@@ -531,7 +665,7 @@ if result is not None:
                 st.warning("⚠️ Không có mã nào đạt chuẩn Mua trong nhóm này!")
 
     with tab4:
-        st.subheader(f"📈 Bảng Xếp Hạng Kỷ Luật Thực Chiến: Nhóm {selected_sector}")
+        st.subheader(f"📈 Bảng Xếp Hạng Kỷ Luật Thực Chiến: Toàn Thị Trường")
         bt_timeframe_all = st.selectbox("⏳ Chọn chu kỳ Backtest:", list(bt_days_dict.keys()), index=1, key="bt_all")
         bt_days_all = bt_days_dict[bt_timeframe_all]
         
@@ -585,12 +719,21 @@ if result is not None:
                 loader = CloudDataLoader()
                 df_top10 = loader.load_leaderboard()
                 if not df_top10.empty:
-                    st.success("Tải Bảng Phong Thần thành công trong chớp mắt!")
                     try:
-                        # BẢN VÁ: RỬA SẠCH DỮ LIỆU TỪ GOOGLE SHEET VỀ LẠI SỐ THỰC CHUẨN
                         for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Giá Canh Mua", "Kelly Mua Mới"]:
                             if col in df_top10.columns:
                                 df_top10[col] = df_top10[col].astype(str).str.replace("'", "").str.replace(",", ".").astype(float)
+                        
+                        valid_buys = df_top10[df_top10['Kelly Mua Mới'] > 0]
+                        valid_count = len(valid_buys)
+                        
+                        st.markdown("---")
+                        if valid_count > 0:
+                            best_sym = valid_buys.iloc[0]['Mã CP']
+                            st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Hệ thống phát hiện **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
+                        else:
+                            st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Lực bán trên diện rộng đang áp đảo. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và đưa Top 10 này vào Danh sách theo dõi!")
+                        st.markdown("---")
                         
                         st.dataframe(df_top10.style.format({
                             "Lãi ròng AI": "{:+.2%}", 
@@ -599,10 +742,10 @@ if result is not None:
                             "Kelly Mua Mới": "{:.1%}"
                         }).background_gradient(subset=["Lãi ròng AI"], cmap="RdYlGn"), use_container_width=True)
                     except Exception as e:
-                        st.error("⚠️ Định dạng cũ bị lỗi. Thầy vui lòng bấm nút 'Cập nhật Bảng (Quét 50 mã)' để AI ghi đè dữ liệu mới chuẩn hóa lên Google Sheet nhé!")
+                        st.error("⚠️ Định dạng cũ bị lỗi. Bấm 'Cập nhật Bảng' để AI ghi đè dữ liệu mới lên Sheet nhé!")
                         st.dataframe(df_top10, use_container_width=True)
                 else:
-                    st.warning("Bảng Phong Thần chưa có dữ liệu. Thầy hãy bấm nút 'Cập nhật Bảng' trước nhé!")
+                    st.warning("Bảng Phong Thần chưa có dữ liệu. Bấm nút 'Cập nhật Bảng' trước nhé!")
 
         if btn_update_top10:
             with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
@@ -640,7 +783,6 @@ if result is not None:
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
                     
-                    # BẢN VÁ: ĐÓNG BĂNG TEXT CHỐNG GOOGLE SHEET PHÁ BĨNH
                     df_top10_save = df_top10.copy()
                     for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Giá Canh Mua", "Kelly Mua Mới"]:
                         df_top10_save[col] = df_top10_save[col].apply(lambda x: f"'{x}")
@@ -648,7 +790,17 @@ if result is not None:
                     loader = CloudDataLoader()
                     loader.save_leaderboard(df_top10_save)
                     
-                    st.success("Đã LƯU vĩnh viễn Bảng Phong Thần lên Google Sheet thành công!")
+                    valid_buys = df_top10[df_top10['Kelly Mua Mới'] > 0]
+                    valid_count = len(valid_buys)
+                    
+                    st.markdown("---")
+                    if valid_count > 0:
+                        best_sym = valid_buys.iloc[0]['Mã CP']
+                        st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Có **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
+                    else:
+                        st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
+                    st.markdown("---")
+                        
                     st.dataframe(df_top10.style.format({
                         "Lãi ròng AI": "{:+.2%}", 
                         "Tỷ lệ Thắng": "{:.1%}", 
@@ -662,7 +814,7 @@ if result is not None:
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
         col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã trang bị tính năng Chống xung đột chuẩn Số thập phân (Locale bug).")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã tích hợp API Gemini siêu tốc.")
 
 # ==========================================
 # BỘ NÃO CHẠY NGẦM (AUTO-BOT: 9h05, 13h05, 15h05)
