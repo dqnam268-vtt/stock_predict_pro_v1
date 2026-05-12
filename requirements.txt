@@ -9,4 +9,4 @@ gspread
 oauth2client
 scikit-learn
 matplotlib
-google-generativeai
+google-generativeai>=0.5.4

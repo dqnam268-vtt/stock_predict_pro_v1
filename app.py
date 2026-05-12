@@ -565,10 +565,8 @@ if result is not None:
                 if not gemini_api_key:
                     st.error("⚠️ Thầy cần nhập Gemini API Key ở thanh menu bên trái trước!")
                 else:
-                    with st.spinner("Gemini đang đọc biểu đồ và bảng điểm..."):
+                    with st.spinner("Gemini đang dò tìm máy chủ và đọc dữ liệu..."):
                         try:
-                            # ĐÃ CHUẨN HÓA MÔ HÌNH GEMINI 1.5 FLASH MỚI NHẤT
-                            model_ai = genai.GenerativeModel('gemini-1.5-flash')
                             prompt = f"""
                             Đóng vai một chuyên gia giao dịch định lượng (Quant Trader). Hãy viết 1 đoạn nhận xét ngắn gọn (khoảng 3-4 câu) bằng tiếng Việt cho cổ phiếu {symbol}.
                             Dữ liệu thuật toán hiện tại:
@@ -579,7 +577,32 @@ if result is not None:
                             - Tỷ trọng vốn khuyến nghị (Kelly): {kelly_pct:.1f}%.
                             Kết luận dứt khoát: Có nên mua hay không? (Nên mua nếu Điểm AI >= 55 và Kelly > 0). Văn phong chuyên nghiệp, lạnh lùng, dứt khoát.
                             """
-                            response = model_ai.generate_content(prompt)
+                            
+                            # BẢN VÁ: BỘ ĐỊNH TUYẾN TỰ ĐỘNG CHỐNG LỖI MÔ HÌNH (SMART ROUTER)
+                            response = None
+                            try:
+                                # Ưu tiên bản Flash mới nhất
+                                model_ai = genai.GenerativeModel('gemini-1.5-flash-latest')
+                                response = model_ai.generate_content(prompt)
+                            except:
+                                try:
+                                    # Kế hoạch B: Chạy bản Pro ổn định
+                                    model_ai = genai.GenerativeModel('gemini-1.0-pro-latest')
+                                    response = model_ai.generate_content(prompt)
+                                except:
+                                    # Kế hoạch C: Quét sạch kho máy chủ xem API được phép chạy con AI nào
+                                    fallback_model = None
+                                    for m in genai.list_models():
+                                        if 'generateContent' in getattr(m, 'supported_generation_methods', []):
+                                            fallback_model = m.name
+                                            if 'flash' in fallback_model or 'pro' in fallback_model:
+                                                break
+                                    if fallback_model:
+                                        model_ai = genai.GenerativeModel(fallback_model)
+                                        response = model_ai.generate_content(prompt)
+                                    else:
+                                        raise Exception("API Key của thầy không có quyền chạy bất kỳ Text Model nào.")
+                            
                             st.session_state[f'gemini_comment_{symbol}'] = response.text
                         except Exception as e:
                             st.error(f"Lỗi API Gemini: {str(e)}")
@@ -752,9 +775,9 @@ if result is not None:
                         st.markdown("---")
                         if valid_count > 0:
                             best_sym = valid_buys.iloc[0]['Mã CP']
-                            st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Hệ thống phát hiện **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
+                            st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Có **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
                         else:
-                            st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Lực bán trên diện rộng đang áp đảo. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
+                            st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
                         st.markdown("---")
                         
                         st.dataframe(df_top10.style.format({
