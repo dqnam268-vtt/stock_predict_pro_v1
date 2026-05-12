@@ -567,7 +567,8 @@ if result is not None:
                 else:
                     with st.spinner("Gemini đang đọc biểu đồ và bảng điểm..."):
                         try:
-                            model_ai = genai.GenerativeModel('gemini-pro')
+                            # ĐÃ CHUẨN HÓA MÔ HÌNH GEMINI 1.5 FLASH MỚI NHẤT
+                            model_ai = genai.GenerativeModel('gemini-1.5-flash')
                             prompt = f"""
                             Đóng vai một chuyên gia giao dịch định lượng (Quant Trader). Hãy viết 1 đoạn nhận xét ngắn gọn (khoảng 3-4 câu) bằng tiếng Việt cho cổ phiếu {symbol}.
                             Dữ liệu thuật toán hiện tại:
@@ -835,7 +836,7 @@ if result is not None:
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
         col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã tích hợp API Gemini siêu tốc.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã trang bị tính năng Chống xung đột chuẩn Số thập phân (Locale bug) và Tích hợp API Gemini siêu tốc.")
 
 # ==========================================
 # BỘ NÃO CHẠY NGẦM (AUTO-BOT: 9h05, 13h05, 15h05)
