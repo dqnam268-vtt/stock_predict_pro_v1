@@ -240,14 +240,17 @@ def run_advanced_backtest(df_bt, nav):
     return df_bt, win_rate, total_trades
 
 # ==========================================
-# QUÉT TỔNG THỂ (CẢ T+5 VÀ T+2 SNIPER) - THÊM MỚI
+# ==========================================
+# QUÉT TỔNG THỂ VÀ TỐI ƯU T+2
 # ==========================================
 def get_bulk_report(mode="standard", status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
     all_results = []
-    if status_element: status_element.info(f"⏳ Đang quét {len(all_tickers)} mã (Chế độ: {mode.upper()})...")
+    
+    if status_element: status_element.info(f"⏳ Đang quét toàn thị trường săn cơ hội {mode.upper()}...")
     
     yf_symbols = [s if s.endswith(".VN") else f"{s}.VN" for s in all_tickers]
+    # Tải sỉ 50 mã trong 2 giây để tránh treo máy
     bulk_data = yf.download(yf_symbols, period="1y", progress=False, threads=True)
     
     for sym in all_tickers:
@@ -260,22 +263,31 @@ def get_bulk_report(mode="standard", status_element=None):
             model = AIModel(); model.train(df_feat)
             prob = model.predict_prob(df_feat)[-1]
             
-            # Cấu hình theo chế độ T+2 Sniper hoặc T+5 Standard
-            tp, sl, threshold = (0.06, 0.04, 0.55) if mode == "standard" else (T2_TAKE_PROFIT, T2_STOP_LOSS, T2_PROB_THRESHOLD)
+            tp, sl = (0.06, 0.04) if mode == "standard" else (T2_TAKE_PROFIT, T2_STOP_LOSS)
             kelly = prob - ((1 - prob) / (tp / sl))
             
-            if prob >= threshold and kelly > 0:
-                all_results.append({"sym": sym, "buy": df['close'].iloc[-1], "prob": prob, "kelly": kelly * 100})
+            all_results.append({"sym": sym, "buy": df['close'].iloc[-1], "prob": prob, "kelly": kelly * 100})
         except: continue
 
     if status_element: status_element.empty()
-    if not all_results: return f"⚠️ Chế độ {mode.upper()}: Không có mã nào đạt chuẩn. Nên đứng ngoài."
-    
-    df_res = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=False).head(10)
-    title = "🎯 TOP 10 CỔ PHIẾU T+5" if mode == "standard" else "⚡ DANH MỤC T+2 SNIPER (>60%)"
-    msg = f"*{title}*\n\n"
+    if not all_results: return "⚠️ Lỗi kết nối dữ liệu."
+
+    df_all = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=False)
+    threshold = 0.55 if mode == "standard" else T2_PROB_THRESHOLD
+    df_qualified = df_all[df_all['prob'] >= threshold]
+
+    if not df_qualified.empty:
+        df_res = df_qualified.head(10)
+        msg = f"🎯 *TOP 10 CỔ PHIẾU TỐT NHẤT ({mode.upper()})*\n\n"
+    else:
+        # TỰ ĐỘNG CHUYỂN SANG TOP 3 NẾU KHÔNG ĐẠT CHUẨN
+        df_res = df_all.head(3)
+        msg = f"⚠️ *TOP 3 MÃ TIỀM NĂNG (DÙ CHƯA ĐẠT CHUẨN {threshold*100}%)*\n\n"
+
     for _, row in df_res.iterrows():
-        msg += f"✅ *{row['sym']}* | Giá: {row['buy']:,.0f}đ | Win: {row['prob']*100:.1f}% | Kelly: {row['kelly']:.1f}%\n"
+        icon = "✅" if row['prob'] >= threshold else "🟡"
+        msg += f"{icon} *{row['sym']}* | Giá: {row['buy']:,.0f}đ | Win: {row['prob']*100:.1f}% | Kelly: {row['kelly']:.1f}%\n"
+        
     return msg
 
 def get_top_10_market_report(status_element=None):
@@ -438,15 +450,13 @@ with st.sidebar:
         genai.configure(api_key=gemini_api_key)
     
     st.markdown("---")
-    st.subheader("⚡ T+2 SNIPER SNIPER")
-    if st.button("🚀 QUÉT TOP 10 MÃ T+2", type="primary", use_container_width=True):
+    st.subheader("⚡ T+2 SNIPER")
+    if st.button("🚀 QUÉT 3 MÃ T+2 TỐT NHẤT", type="primary", use_container_width=True):
         status = st.empty()
         report = get_bulk_report(mode="t2", status_element=status)
         st.markdown(report)
-        # Bắn kết quả sang Telegram ngay khi quét xong
-        send_telegram_alert(st.secrets["TELEGRAM_TOKEN"], st.secrets["TELEGRAM_CHAT_ID"], f"⚡ *BÁO CÁO T+2 SNIPER*\n\n{report}")
-
-    st.markdown("---")
+        # Bắn kết quả sang Telegram cho thầy quan sát từ xa
+        send_telegram_alert(st.secrets["TELEGRAM_TOKEN"], st.secrets["TELEGRAM_CHAT_ID"], report)
     st.header("⚙️ Chế độ Tự Động)")
     auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
     st.caption("AI tự chạy ngầm. Sẽ tự động gửi Báo cáo Top 10 toàn TT vào đúng các mốc: 9h05, 13h05 và 15h05.")
