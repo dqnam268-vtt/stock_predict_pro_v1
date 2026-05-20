@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -32,13 +32,6 @@ INDUSTRIES = {
     "🚢 Cảng biển & Thủy sản": ["HAH", "GMD", "VSC", "VHC", "ANV", "FMC"]
 }
 
-# ==========================================
-# THAM SỐ CHIẾN THUẬT T+2 SNIPER CHÍNH XÁC
-# ==========================================
-T2_PROB_THRESHOLD = 0.60  # Xác suất tối thiểu 60% cho T+2 短期
-T2_TAKE_PROFIT = 0.045    # Chốt lời mục tiêu +4.5%
-T2_STOP_LOSS = 0.030      # Cắt lỗ nghiêm ngặt -3.0%
-
 if 'sent_9h05' not in st.session_state: st.session_state['sent_9h05'] = None
 if 'sent_13h05' not in st.session_state: st.session_state['sent_13h05'] = None
 if 'sent_15h05' not in st.session_state: st.session_state['sent_15h05'] = None
@@ -51,7 +44,7 @@ def send_telegram_alert(bot_token, chat_id, message):
     except: return False
 
 # ==========================================
-# PHẦN 1: KHO DỮ LIỆU CLOUD CHO UI
+# PHẦN 1: KHO DỮ LIỆU CLOUD CHO UI 
 # ==========================================
 class CloudDataLoader:
     def __init__(self):
@@ -92,6 +85,10 @@ class CloudDataLoader:
         start_date = end_date - timedelta(days=days)
 
         if self.db is None: return self.download_yf(yf_symbol, start_date, end_date)
+
+        worksheet = None
+        df = pd.DataFrame()
+
         try:
             worksheet = self.db.worksheet(symbol)
             data = worksheet.get_all_records()
@@ -235,86 +232,98 @@ def run_advanced_backtest(df_bt, nav):
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return df_bt, win_rate, total_trades
 
-# ==========================================
-# QUÉT TỔNG THỂ VÀ TỐI ƯU T+2 (BẢN VÁ LỖI KẾT NỐI MA TRẬN BẤT TỬ)
-# ==========================================
-def get_bulk_report(mode="standard", status_element=None):
+def get_top_10_market_report(status_element=None):
     all_tickers = [tic for sublist in INDUSTRIES.values() for tic in sublist]
-    all_results = []
+    all_results = [] 
     
-    if status_element: 
-        status_element.warning(f"📡 Đang kết nối Trạm vũ trụ Yahoo... Quét sỉ hệ thống {mode.upper()} chống chặn IP.")
-    
-    try:
-        yf_symbols = [s if s.endswith(".VN") else f"{s}.VN" for s in all_tickers]
-        # Sử dụng group_by="ticker" gom 50 mã về 1 Request duy nhất, bẻ gãy hoàn toàn cơ chế quét bot của Yahoo Finance
-        bulk_data = yf.download(yf_symbols, period="2y", group_by="ticker", progress=False, threads=True)
-    except Exception as e:
-        return f"⚠️ Lỗi kết nối trực tiếp máy chủ Yahoo: {str(e)}. Thầy vui lòng quét lại sau vài giây."
+    if status_element:
+        status_element.info("⏳ **Đang tung lưới bắt dữ liệu LIVE 50 mã cùng lúc (Bỏ qua Google Sheet)...**")
 
-    for sym in all_tickers:
-        yf_s = sym if sym.endswith(".VN") else f"{sym}.VN"
-        try:
-            if yf_s not in bulk_data.columns.levels[0]: 
-                continue
-            df_ticker = bulk_data[yf_s].dropna(subset=['Close'])
-            if len(df_ticker) < 205: 
-                continue
-                
-            df = df_ticker.copy()
-            df.reset_index(inplace=True)
-            df.columns = [c.lower() for c in df.columns]
+    try:
+        yf_symbols = [sym if sym.endswith(".VN") else f"{sym}.VN" for sym in all_tickers]
+        bulk_data = yf.download(yf_symbols, period="1y", progress=False, threads=True)
+    except Exception as e:
+        return "⚠️ *LỖI MẠNG:* Không thể kết nối với Vệ tinh Yahoo Finance. Xin thử lại sau."
+        
+    for i, sym in enumerate(all_tickers):
+        if status_element:
+            status_element.warning(f"🧠 **AI đang chấm điểm mã: {sym} ({i+1}/50)...**")
             
-            if 'date' not in df.columns and 'datetime' in df.columns:
-                df.rename(columns={'datetime': 'date'}, inplace=True)
+        yf_sym = sym if sym.endswith(".VN") else f"{sym}.VN"
+        try:
+            df = pd.DataFrame()
+            df['open'] = bulk_data['Open'][yf_sym]
+            df['high'] = bulk_data['High'][yf_sym]
+            df['low'] = bulk_data['Low'][yf_sym]
+            df['close'] = bulk_data['Close'][yf_sym]
+            df['volume'] = bulk_data['Volume'][yf_sym]
+            
+            df.reset_index(inplace=True)
+            df.rename(columns={'Date': 'date', 'Datetime': 'date'}, inplace=True)
+            
+            if 'date' in df.columns and df['date'].dt.tz is not None:
+                df['date'] = df['date'].dt.tz_localize(None)
+                
+            invalid_rows = (df['close'] <= 100) | (df['close'] > 2000000)
+            df.loc[invalid_rows, 'close'] = np.nan
+            df['close'].ffill(inplace=True)
+            df.dropna(subset=['close'], inplace=True)
+            
+            if len(df) < 50: continue
             
             df_feat = build_features(df)
-            if df_feat.empty: 
-                continue
-                
-            model = AIModel()
-            if not model.train(df_feat): 
-                continue
-                
-            prob = model.predict_prob(df_feat)[-1]
+            if df_feat is None or df_feat.empty: continue
             
-            tp, sl = (0.06, 0.04) if mode == "standard" else (T2_TAKE_PROFIT, T2_STOP_LOSS)
-            kelly = prob - ((1 - prob) / (tp / sl))
+            model = AIModel()
+            model.train(df_feat)
+            all_probs = model.predict_prob(df_feat)
+            prob = all_probs[-1]
+            
+            current_price = df_feat['close'].iloc[-1]
+            
+            profit_target = 0.06 
+            loss_limit = 0.04    
+            win_loss_ratio = profit_target / loss_limit
+            kelly = prob - ((1 - prob) / win_loss_ratio)
+            
+            is_strict_buy = (kelly > 0 and prob >= 0.55)
             
             all_results.append({
                 "sym": sym, 
-                "buy": df['close'].iloc[-1], 
-                "prob": prob, 
-                "kelly": kelly * 100
+                "buy": current_price, 
+                "kelly": kelly * 100, 
+                "prob": prob,
+                "is_strict": is_strict_buy
             })
-        except:
-            continue
-
-    if status_element: 
+        except Exception:
+            continue 
+            
+    if status_element:
         status_element.empty()
-        
-    if not all_results: 
-        return "⚠️ Yahoo Finance đang nghẽn mạng cục bộ. Thầy vui lòng nhấn lại lệnh Quét sau 10 giây nhé!"
 
-    df_all = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=False)
-    threshold = 0.55 if mode == "standard" else T2_PROB_THRESHOLD
-    df_qualified = df_all[df_all['prob'] >= threshold]
+    if not all_results:
+        return "⚠️ Lỗi xử lý: AI không thể tính toán dữ liệu trả về."
 
-    if not df_qualified.empty:
-        df_res = df_qualified.head(10)
-        title = "🎯 TOP 10 CỔ PHIẾU TỐT NHẤT T+5" if mode == "standard" else "⚡ DANH MỤC T+2 SNIPER (>60%)"
-        msg = f"*{title}*\n\n"
+    radar_df = pd.DataFrame(all_results).sort_values(by=["prob", "kelly"], ascending=[False, False]).head(10)
+    has_strict_buys = radar_df['is_strict'].any()
+
+    if has_strict_buys:
+        msg = "🎯 *ĐÁNH GIÁ THỊ TRƯỜNG:* Có dòng tiền vào! Dưới đây là TOP 10 mã sáng giá nhất (Lọc từ 50 mã):\n\n"
     else:
-        # TỰ ĐỘNG CHUYỂN DỊCH THEO Ý THẦY: Nếu không có mã nào đạt chuẩn, nhả ngay Top 3 tiềm năng nhất
-        df_res = df_all.head(3)
-        title = f"⚠️ TOP 3 MÃ TIỀM NĂNG NHẤT KHUNG {mode.upper()}"
-        msg = f"*{title} (Dù chưa đạt chuẩn {threshold*100}%)*\n"
-        msg += "_Thị trường chung hiện tại đang rủi ro, lực bán tháo áp đảo. Thầy nên ưu tiên đưa 3 mã khỏe nhất này vào Watchlist:_\n\n"
+        msg = "⚠️ *ĐÁNH GIÁ THỊ TRƯỜNG:* Lực bán áp đảo, **KHÔNG CÓ MÃ NÀO ĐẠT CHUẨN MUA AN TOÀN**.\n"
+        msg += "👉 Tuy nhiên, dưới đây là *TOP 10 mã khỏe nhất* để thầy đưa vào **DANH SÁCH THEO DÕI (WATCHLIST)**:\n\n"
 
-    for _, row in df_res.iterrows():
-        icon = "✅" if row['prob'] >= threshold else "🟡"
-        msg += f"{icon} *{row['sym']}* | Giá: {row['buy']:,.0f}đ | Win: {row['prob']*100:.1f}% | Kelly: {row['kelly']:.1f}%\n"
+    for rank, row in radar_df.iterrows():
+        if row['is_strict']:
+            icon = "🟢"
+            status = "MUA"
+        else:
+            icon = "🟡"
+            status = "THEO DÕI"
+            
+        msg += f"{icon} *{row['sym']}* ({status}) | Giá: {row['buy']:,.0f}đ | Win: {row['prob']*100:.1f}%\n"
         
+    msg += "\n💡 *Ghi chú:* \n- 🟢 Đạt chuẩn AI (Vào lệnh & Quản trị rủi ro +6%/-4%).\n- 🟡 Gần đạt chuẩn (Lưu vào tầm ngắm chờ điểm nổ)."
     return msg
 
 # ------------------------------------------------------------------
@@ -364,7 +373,7 @@ def get_19_criteria_scores(row, prob, df):
 st.set_page_config(page_title="AI Quant - Bảng Điều Khiển", layout="wide")
 
 with st.sidebar:
-    st.header("🤖 NamY AI Sniper")
+    st.header("🤖 Cài đặt Bot & API")
     try:
         bot_token = st.secrets["TELEGRAM_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
@@ -383,23 +392,16 @@ with st.sidebar:
         genai.configure(api_key=gemini_api_key)
     
     st.markdown("---")
-    st.subheader("⚡ CHIẾN THUẬT T+2 SNIPER")
-    if st.button("🚀 QUÉT 3 MÃ T+2 TỐT NHẤT", type="primary", use_container_width=True):
-        status_t2 = st.empty()
-        report_t2 = get_bulk_report(mode="t2", status_element=status_t2)
-        st.markdown(report_t2)
-        send_telegram_alert(bot_token, chat_id, report_t2)
-
-    st.markdown("---")
-    st.header("⚙️ Chế độ Tự Động T+5")
-    auto_bot = st.toggle("📡 Bật Auto-Bot T+5 (Báo cáo Định kỳ)", value=False)
-    st.caption("AI tự chạy ngầm gửi Báo cáo Top 10 toàn TT vào lúc: 9h05, 13h05 và 15h05.")
+    st.header("⚙️ Chế độ Cắm Máy (Tự Động)")
+    auto_bot = st.toggle("📡 Bật Auto-Bot (Báo cáo Định kỳ)", value=False)
+    st.caption("AI tự chạy ngầm. Sẽ tự động gửi Báo cáo Top 10 toàn TT vào đúng các mốc: 9h05, 13h05 và 15h05.")
     
     st.write("")
-    if st.button("🚀 GỬI BÁO CÁO TOP 10 T+5 NGAY", use_container_width=True):
+    
+    if st.button("🚀 GỬI BÁO CÁO TOP 10 NGAY", use_container_width=True, type="primary"):
         if bot_token and chat_id:
             status_text = st.empty() 
-            report_msg = get_bulk_report(mode="standard", status_element=status_text)
+            report_msg = get_top_10_market_report(status_text)
             
             status_text.warning("✅ *Đang tổng hợp tín hiệu và bắn qua Telegram...*")
             full_message = f"⚡ *BÁO CÁO NHANH THEO YÊU CẦU (THỦ CÔNG)* ⚡\n\n{report_msg}"
@@ -407,14 +409,14 @@ with st.sidebar:
             if send_telegram_alert(bot_token, chat_id, full_message):
                 status_text.success("🎉 Đã bắn báo cáo Top 10 qua Telegram thành công!")
             else:
-                status_text.error("Gửi thất bại. Hãy kiểm tra lại cấu hình Telegram.")
+                status_text.error("Gửi thất bại. Hãy kiểm tra lại Bot Token hoặc Chat ID.")
         else:
-            st.error("Thầy vui lòng nhập Token và Chat ID trước nhé!")
+            st.error("Thầy vui lòng nhập Bot Token và Chat ID ở trên trước nhé!")
             
     st.markdown("---")
     st.caption("✨ Tối ưu & Phát triển bởi **NamY**")
     
-st.title("Hệ thống Dự báo AI Quant")
+st.title("📈 Hệ thống Dự báo Định lượng (AI Quant)")
 
 if st.button("🔄 Xóa Nhớ Đệm & Cập nhật Dữ liệu Mới Nhất", use_container_width=True):
     st.cache_data.clear()
@@ -552,7 +554,11 @@ if result is not None:
             
         st.markdown("---")
         
+        # ------------------------------------------------------------------
+        # VÙNG NHẬN XÉT GEMINI AI & GỬI TELEGRAM CHO MÃ ĐƠN LẺ
+        # ------------------------------------------------------------------
         col_gemini, col_tele = st.columns(2)
+        
         with col_gemini:
             st.subheader("🧠 Hỏi Chuyên gia Gemini")
             if st.button("💬 Phân tích mã " + symbol, use_container_width=True):
@@ -561,7 +567,6 @@ if result is not None:
                 else:
                     with st.spinner("Gemini đang dò tìm máy chủ và đọc dữ liệu..."):
                         try:
-                            model_ai = genai.GenerativeModel('gemini-1.5-flash-latest')
                             prompt = f"""
                             Đóng vai một chuyên gia giao dịch định lượng (Quant Trader). Hãy viết 1 đoạn nhận xét ngắn gọn (khoảng 3-4 câu) bằng tiếng Việt cho cổ phiếu {symbol}.
                             Dữ liệu thuật toán hiện tại:
@@ -572,7 +577,32 @@ if result is not None:
                             - Tỷ trọng vốn khuyến nghị (Kelly): {kelly_pct:.1f}%.
                             Kết luận dứt khoát: Có nên mua hay không? (Nên mua nếu Điểm AI >= 55 và Kelly > 0). Văn phong chuyên nghiệp, lạnh lùng, dứt khoát.
                             """
-                            response = model_ai.generate_content(prompt)
+                            
+                            # BẢN VÁ: BỘ ĐỊNH TUYẾN TỰ ĐỘNG CHỐNG LỖI MÔ HÌNH (SMART ROUTER)
+                            response = None
+                            try:
+                                # Ưu tiên bản Flash mới nhất
+                                model_ai = genai.GenerativeModel('gemini-1.5-flash-latest')
+                                response = model_ai.generate_content(prompt)
+                            except:
+                                try:
+                                    # Kế hoạch B: Chạy bản Pro ổn định
+                                    model_ai = genai.GenerativeModel('gemini-1.0-pro-latest')
+                                    response = model_ai.generate_content(prompt)
+                                except:
+                                    # Kế hoạch C: Quét sạch kho máy chủ xem API được phép chạy con AI nào
+                                    fallback_model = None
+                                    for m in genai.list_models():
+                                        if 'generateContent' in getattr(m, 'supported_generation_methods', []):
+                                            fallback_model = m.name
+                                            if 'flash' in fallback_model or 'pro' in fallback_model:
+                                                break
+                                    if fallback_model:
+                                        model_ai = genai.GenerativeModel(fallback_model)
+                                        response = model_ai.generate_content(prompt)
+                                    else:
+                                        raise Exception("API Key của thầy không có quyền chạy bất kỳ Text Model nào.")
+                            
                             st.session_state[f'gemini_comment_{symbol}'] = response.text
                         except Exception as e:
                             st.error(f"Lỗi API Gemini: {str(e)}")
@@ -602,6 +632,9 @@ if result is not None:
                 else:
                     st.error("Chưa nhập thông tin Telegram!")
 
+        # ------------------------------------------------------------------
+        # BẢNG ĐIỂM CHI TIẾT 19 TIÊU CHÍ 
+        # ------------------------------------------------------------------
         st.write("")
         with st.expander("🔎 XEM BẢNG CHẤM ĐIỂM CHI TIẾT 19 TIÊU CHÍ VĨ MÔ (Thang 100)"):
             st.caption("Thuật toán đã dịch các chỉ báo kỹ thuật thô thành ngôn ngữ Giao dịch Định lượng. Điểm được chuẩn hóa từ 0 đến 100 (100 = Cực kỳ Tích cực/An toàn, 0 = Cực kỳ Tiêu cực/Rủi ro).")
@@ -662,6 +695,7 @@ if result is not None:
                 if not res: continue
                 scan_prob = res['prob']
                 cur_price = res['df_feat']['close'].iloc[-1]
+                
                 scan_kelly = max(0, (scan_prob - ((1-scan_prob)/(0.06/0.04)))) * 100
                         
                 if scan_kelly > 0 and scan_prob >= 0.55:
@@ -701,6 +735,7 @@ if result is not None:
                     bt_df['prob'] = res_bt['all_probs'][-bt_days_actual:]
                     
                     bt_df, win_rate_pct, total_tr = run_advanced_backtest(bt_df, nav)
+                    
                     final_equity = bt_df['strategy_equity'].iloc[-1]
                     profit_pct = (final_equity / nav - 1) 
                     bnh_profit_pct = (bt_df['bnh_equity'].iloc[-1] / nav - 1) 
@@ -744,6 +779,7 @@ if result is not None:
                         else:
                             st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
                         st.markdown("---")
+                        
                         st.dataframe(df_top10.style.format({
                             "Lãi ròng AI": "{:+.2%}", 
                             "Tỷ lệ Thắng": "{:.1%}", 
@@ -757,7 +793,7 @@ if result is not None:
                     st.warning("Bảng Phong Thần chưa có dữ liệu. Bấm nút 'Cập nhật Bảng' trước nhé!")
 
         if btn_update_top10:
-            with st.spinner("Đang cày xới 50 mã..."):
+            with st.spinner("Đang cày xới 50 mã (Có tính phí giao dịch) để tìm Top 10 xuất sắc nhất..."):
                 all_top10_results = []
                 all_tickers_list = [tic for sublist in INDUSTRIES.values() for tic in sublist]
                 bt_progress = st.progress(0)
@@ -786,16 +822,19 @@ if result is not None:
                         "Kelly Mua Mới": scan_kelly
                     })
                     bt_progress.progress((idx + 1) / len(all_tickers_list))
+                
                 bt_progress.empty()
                 
                 if all_top10_results:
                     df_top10 = pd.DataFrame(all_top10_results).sort_values(by="Lãi ròng AI", ascending=False).head(10).reset_index(drop=True)
+                    
                     df_top10_save = df_top10.copy()
                     for col in ["Lãi ròng AI", "Tỷ lệ Thắng", "Giá Canh Mua", "Kelly Mua Mới"]:
                         df_top10_save[col] = df_top10_save[col].apply(lambda x: f"'{x}")
                     
                     loader = CloudDataLoader()
                     loader.save_leaderboard(df_top10_save)
+                    
                     valid_buys = df_top10[df_top10['Kelly Mua Mới'] > 0]
                     valid_count = len(valid_buys)
                     
@@ -804,8 +843,9 @@ if result is not None:
                         best_sym = valid_buys.iloc[0]['Mã CP']
                         st.success(f"🎯 **ĐÁNH GIÁ TỔNG QUAN:** Dòng tiền **TÍCH CỰC**. Có **{valid_count}/10 mã** lọt vào điểm mua an toàn. Đứng đầu sóng đang là **{best_sym}**.")
                     else:
-                        st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI**!")
+                        st.error("⚠️ **ĐÁNH GIÁ TỔNG QUAN:** Thị trường **RỦI RO CAO**. Khuyến nghị: **ÔM TIỀN MẶT ĐỨNG NGOÀI** và thêm Top 10 này vào Danh sách theo dõi!")
                     st.markdown("---")
+                        
                     st.dataframe(df_top10.style.format({
                         "Lãi ròng AI": "{:+.2%}", 
                         "Tỷ lệ Thắng": "{:.1%}", 
@@ -819,7 +859,7 @@ if result is not None:
         col_ai1.metric("Thuật toán (AI Core)", "XGBoost 2.0 (Học sâu)")
         col_ai2.metric("Dữ liệu Lịch sử Đã nạp", f"Tối đa ({result['data_rows']} nến/mã)")
         col_ai3.metric("Bộ Đặc trưng (Features)", f"{result['features_count']} chỉ báo Vĩ mô")
-        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Đã vá xong lỗi MultiIndex của yfinance.")
+        st.info("💡 **Hệ thống Kiểm tra & Huấn luyện Liên tục:** Tôn trọng dữ liệu trên Google Sheet. Đã trang bị tính năng Chống xung đột chuẩn Số thập phân (Locale bug) và Tích hợp API Gemini siêu tốc.")
 
 # ==========================================
 # BỘ NÃO CHẠY NGẦM (AUTO-BOT: 9h05, 13h05, 15h05)
@@ -842,8 +882,9 @@ if auto_bot and bot_token and chat_id:
             elif trigger_13: session_name = "CHIỀU (13h05)"
             else: session_name = "TỔNG KẾT (15h05)"
             
-            report_msg = get_bulk_report(mode="standard") 
+            report_msg = get_top_10_market_report() 
             full_msg = f"🔔 *BÁO CÁO ĐỊNH KỲ: PHIÊN {session_name}* ({vn_time.strftime('%d/%m')})\n\n{report_msg}"
+            
             send_telegram_alert(bot_token, chat_id, full_msg)
             
             if trigger_9: st.session_state['sent_9h05'] = today_str
